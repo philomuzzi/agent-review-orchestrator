@@ -1,0 +1,529 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codex-review.schema.json",
+  "title": "Codex Review Outputs",
+  "description": "Structured outputs accepted from the Codex reviewer adapter. Runtime calls constrain codex exec with the per-phase model schema; this file is the static union for documentation and tooling.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/initial_review"
+    },
+    {
+      "$ref": "#/$defs/closure_review"
+    },
+    {
+      "$ref": "#/$defs/final_review"
+    }
+  ],
+  "$defs": {
+    "initial_review": {
+      "$defs": {
+        "Issue": {
+          "properties": {
+            "id": {
+              "default": "",
+              "title": "Id",
+              "type": "string"
+            },
+            "category": {
+              "$ref": "#/$defs/IssueCategory",
+              "default": "DESIGN"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity",
+              "default": "NON_BLOCKING"
+            },
+            "status": {
+              "$ref": "#/$defs/IssueStatus",
+              "default": "OPEN"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "problem": {
+              "default": "",
+              "title": "Problem",
+              "type": "string"
+            },
+            "evidence": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Evidence",
+              "type": "array"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "acceptance": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Acceptance",
+              "type": "array"
+            },
+            "introduced_round": {
+              "default": 1,
+              "title": "Introduced Round",
+              "type": "integer"
+            },
+            "provenance": {
+              "default": "INITIAL_REVIEW",
+              "title": "Provenance",
+              "type": "string"
+            },
+            "based_on_task_revision": {
+              "default": 1,
+              "title": "Based On Task Revision",
+              "type": "integer"
+            },
+            "addressed_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Addressed By"
+            },
+            "resolution": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Resolution"
+            },
+            "why_not_detected_initially": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why Not Detected Initially"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "Issue",
+          "type": "object"
+        },
+        "IssueCategory": {
+          "enum": [
+            "DESIGN",
+            "REQUIREMENT",
+            "FACT",
+            "REGRESSION",
+            "SUGGESTION"
+          ],
+          "title": "IssueCategory",
+          "type": "string"
+        },
+        "IssueSeverity": {
+          "enum": [
+            "BLOCKING",
+            "NON_BLOCKING"
+          ],
+          "title": "IssueSeverity",
+          "type": "string"
+        },
+        "IssueStatus": {
+          "enum": [
+            "OPEN",
+            "ADDRESSED",
+            "RESOLVED",
+            "NEED_HUMAN",
+            "ACCEPTED_RISK",
+            "SUPERSEDED"
+          ],
+          "title": "IssueStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "InitialReviewResult",
+      "type": "object"
+    },
+    "closure_review": {
+      "$defs": {
+        "Issue": {
+          "properties": {
+            "id": {
+              "default": "",
+              "title": "Id",
+              "type": "string"
+            },
+            "category": {
+              "$ref": "#/$defs/IssueCategory",
+              "default": "DESIGN"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity",
+              "default": "NON_BLOCKING"
+            },
+            "status": {
+              "$ref": "#/$defs/IssueStatus",
+              "default": "OPEN"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "problem": {
+              "default": "",
+              "title": "Problem",
+              "type": "string"
+            },
+            "evidence": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Evidence",
+              "type": "array"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "acceptance": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Acceptance",
+              "type": "array"
+            },
+            "introduced_round": {
+              "default": 1,
+              "title": "Introduced Round",
+              "type": "integer"
+            },
+            "provenance": {
+              "default": "INITIAL_REVIEW",
+              "title": "Provenance",
+              "type": "string"
+            },
+            "based_on_task_revision": {
+              "default": 1,
+              "title": "Based On Task Revision",
+              "type": "integer"
+            },
+            "addressed_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Addressed By"
+            },
+            "resolution": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Resolution"
+            },
+            "why_not_detected_initially": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why Not Detected Initially"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "Issue",
+          "type": "object"
+        },
+        "IssueCategory": {
+          "enum": [
+            "DESIGN",
+            "REQUIREMENT",
+            "FACT",
+            "REGRESSION",
+            "SUGGESTION"
+          ],
+          "title": "IssueCategory",
+          "type": "string"
+        },
+        "IssueOutcome": {
+          "properties": {
+            "issue_id": {
+              "title": "Issue Id",
+              "type": "string"
+            },
+            "resolution": {
+              "title": "Resolution",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "issue_id",
+            "resolution"
+          ],
+          "title": "IssueOutcome",
+          "type": "object"
+        },
+        "IssueSeverity": {
+          "enum": [
+            "BLOCKING",
+            "NON_BLOCKING"
+          ],
+          "title": "IssueSeverity",
+          "type": "string"
+        },
+        "IssueStatus": {
+          "enum": [
+            "OPEN",
+            "ADDRESSED",
+            "RESOLVED",
+            "NEED_HUMAN",
+            "ACCEPTED_RISK",
+            "SUPERSEDED"
+          ],
+          "title": "IssueStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "issue_outcomes": {
+          "items": {
+            "$ref": "#/$defs/IssueOutcome"
+          },
+          "title": "Issue Outcomes",
+          "type": "array"
+        },
+        "new_issues": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "New Issues",
+          "type": "array"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "ClosureReviewResult",
+      "type": "object"
+    },
+    "final_review": {
+      "$defs": {
+        "Issue": {
+          "properties": {
+            "id": {
+              "default": "",
+              "title": "Id",
+              "type": "string"
+            },
+            "category": {
+              "$ref": "#/$defs/IssueCategory",
+              "default": "DESIGN"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity",
+              "default": "NON_BLOCKING"
+            },
+            "status": {
+              "$ref": "#/$defs/IssueStatus",
+              "default": "OPEN"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "problem": {
+              "default": "",
+              "title": "Problem",
+              "type": "string"
+            },
+            "evidence": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Evidence",
+              "type": "array"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "acceptance": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Acceptance",
+              "type": "array"
+            },
+            "introduced_round": {
+              "default": 1,
+              "title": "Introduced Round",
+              "type": "integer"
+            },
+            "provenance": {
+              "default": "INITIAL_REVIEW",
+              "title": "Provenance",
+              "type": "string"
+            },
+            "based_on_task_revision": {
+              "default": 1,
+              "title": "Based On Task Revision",
+              "type": "integer"
+            },
+            "addressed_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Addressed By"
+            },
+            "resolution": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Resolution"
+            },
+            "why_not_detected_initially": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why Not Detected Initially"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "Issue",
+          "type": "object"
+        },
+        "IssueCategory": {
+          "enum": [
+            "DESIGN",
+            "REQUIREMENT",
+            "FACT",
+            "REGRESSION",
+            "SUGGESTION"
+          ],
+          "title": "IssueCategory",
+          "type": "string"
+        },
+        "IssueSeverity": {
+          "enum": [
+            "BLOCKING",
+            "NON_BLOCKING"
+          ],
+          "title": "IssueSeverity",
+          "type": "string"
+        },
+        "IssueStatus": {
+          "enum": [
+            "OPEN",
+            "ADDRESSED",
+            "RESOLVED",
+            "NEED_HUMAN",
+            "ACCEPTED_RISK",
+            "SUPERSEDED"
+          ],
+          "title": "IssueStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "satisfies_requirement": {
+          "default": false,
+          "title": "Satisfies Requirement",
+          "type": "boolean"
+        },
+        "unresolved_issue_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Issue Ids",
+          "type": "array"
+        },
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "FinalReviewResult",
+      "type": "object"
+    }
+  }
+}

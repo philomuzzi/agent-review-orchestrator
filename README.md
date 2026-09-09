@@ -2,73 +2,125 @@
 
 A local Python CLI orchestrator for converging design changes in existing software projects through a controlled **Pi Author + Codex Reviewer + Human Gate** workflow.
 
-## V0 Goal
+The tool never implements code itself. Given a natural-language request inside an existing repository, it converges an **implementation-ready design** (`final.md`) or stops at an explicit boundary (`HUMAN_HANDOFF`).
 
-Given a natural-language change request or problem description inside an existing repository, the tool should:
+## Install
 
-1. let Pi investigate the current codebase and establish the current state;
-2. turn user intent + repository facts into a Change Contract;
-3. ask the human only when a real requirement, scope, fact, or trade-off decision is required;
-4. let Pi produce the minimum implementable design;
-5. let Codex review it using structured issues and acceptance criteria;
-6. automatically control revision, closure review, ablation, and convergence budgets;
-7. produce a final implementation-ready `final.md` without requiring manual copy/paste between agents.
-
-## V0 Scope
-
-V0 focuses on existing repositories and medium/small engineering changes:
-
-- mid-development requirement changes;
-- missing functionality;
-- bounded capability additions;
-- problem investigation and fix design;
-- design review convergence.
-
-V0 intentionally does **not** include automatic implementation, Git commits, deployment, production access, MCP-based environment verification, multi-reviewer voting, or a generic multi-agent framework.
-
-## Architecture
-
-```text
-Human
-  │
-  ▼
-Python CLI Orchestrator
-  ├── Pi        → Discover / Investigate / Design / Revision / Ablation
-  ├── Codex     → Initial Review / Closure Review / Final Review
-  └── State     → deterministic lifecycle, budgets, Human Gate, persistence
+```bash
+python -m pip install -e .
 ```
 
-Core rule:
+Requires Python 3.11+. External agents are optional at test time but required for real runs:
 
-> Agents may change the solution, but must not silently change the requirement.
+- **Pi** (`pi`, tested with 0.85.x) — used via `pi --mode rpc`;
+- **Codex CLI** (`codex`, tested with 0.153.x) — used via non-interactive `codex exec`.
 
-## Status
+## Usage
 
-**V0 design frozen. Repository is ready for autonomous implementation.**
-
-Execution documents:
-
-- [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEMENTATION_SPEC.md) — what V0 must implement, protocol contracts, milestones and acceptance criteria.
-- [`docs/V0_AUTONOMOUS.md`](docs/V0_AUTONOMOUS.md) — how an implementation agent must autonomously execute M0→M6, test, repair failures and escalate only real blockers.
-
-## Autonomous Implementation Trigger
-
-A coding agent can be started with a short instruction:
-
-```text
-Read docs/V0_IMPLEMENTATION_SPEC.md and docs/V0_AUTONOMOUS.md.
-Implement V0 autonomously from the current repository state through M6.
-Follow milestone acceptance gates, run tests and fix failures yourself.
-Do not expand V0 scope. Only stop for a Human Escalation condition defined in V0_AUTONOMOUS.md.
+```bash
+review "给同步任务增加暂停能力，尽量最小改动"
+review --repo /path/to/repo "request"        # default repo: current directory
+review --kind change "request"               # or: problem
+review resume [session-id]                   # resume interrupted / gate sessions
+review status [session-id]                   # phase, blockers, budgets
+review show [final|gate|task|proposal|issues] [session-id]
 ```
 
-## Planned CLI
+Answer a Human Gate by running `review resume` in a terminal; or read
+`.review/<session>/human-gate.md` and answer later. Non-interactive runs
+(stdin not a TTY) persist the gate packet and exit `20`.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | DONE — `final.md` written |
+| 10   | HUMAN_HANDOFF — task-level boundary (budget exhausted, unresolved fact, real trade-off) |
+| 20   | WAITING_FOR_HUMAN — gate packet persisted, needs answers |
+| 30   | FAILED — tooling/protocol failure (fails closed) |
+| 130  | INTERRUPTED — Ctrl+C; resume with `review resume` |
+
+## Workflow
 
 ```text
-review "<natural language request>"
-review resume
-review status
-review show
+request → DISCOVER → [INVESTIGATE for problem mode] → INTAKE (Change Contract)
+→ [Human Gate only when required] → DESIGN → INITIAL_REVIEW
+→ REVISION if blocked → CLOSURE_REVIEW → ABLATION if unresolved
+→ FINAL_REVIEW → FINALIZE → final.md
 ```
 
-Each run persists its authoritative state under the target repository's `.review/<session>/` directory so the workflow is resumable and auditable.
+Core rules (full contracts in [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEMENTATION_SPEC.md)):
+
+- Human owns requirement semantics; repository owns current-state facts.
+- Codex raises structured issues; the orchestrator computes PASS mechanically.
+- Pi may mark an issue ADDRESSED; only Codex verifies RESOLVED.
+- Budgets are hard limits (1 revision, 1 ablation, 2 human interruptions, 1 protocol repair).
+- A human decision that changes the design basis bumps `task_revision`; the old
+  proposal goes to `history/` marked STALE and the session redesigns.
+
+## Session state
+
+Everything lands under the target repository:
+
+```text
+<repo>/.review/<session-id>/
+├── input.md, discovery.md, investigation.md
+├── task.md + task.json          # Change Contract
+├── proposal.md + proposal.json  # current design
+├── change-map.json, issues.json, decisions.json
+├── human-gate.json + human-gate.md
+├── state.json                   # authoritative phase/budget state
+├── ablation.md, final.md
+├── events.jsonl                 # audit trail
+├── raw/                         # pi-*.jsonl / codex-*.jsonl agent I/O
+└── history/                     # STALE proposals
+```
+
+Structured JSON is authoritative; Markdown is the human-readable projection.
+
+## Safety model
+
+- **Pi** runs with a read-only tool allowlist (`--tools read`); no edit/write/shell.
+- **Codex** runs in the `read-only` sandbox.
+- Both adapters probe capability at startup — including a write-probe in a
+  scratch directory — and **fail closed** (exit 30) when safe read-only
+  execution cannot be established.
+- The Python orchestrator writes only `.review/` inside the target repository.
+
+## Configuration (optional)
+
+`~/.agent-review/config.toml` (or path in `AGENT_REVIEW_CONFIG`):
+
+```toml
+[pi]
+binary = "pi"
+model = ""            # empty = your existing default
+
+[codex]
+binary = "codex"
+model = ""
+
+[budgets]
+revision = 1
+ablation = 1
+human_interruptions = 2
+protocol_retries = 1
+```
+
+Binary names can also be overridden with `AGENT_REVIEW_PI_BIN` /
+`AGENT_REVIEW_CODEX_BIN`. No model routing in V0.
+
+## Development
+
+```bash
+python -m pip install -e .[dev]
+python -m pytest                    # deterministic suite (fake/mock adapters)
+AGENT_REVIEW_SMOKE=1 python -m pytest   # additionally run real pi/codex smoke tests
+```
+
+- `AGENT_REVIEW_FAKE_ADAPTERS=1` forces deterministic fake adapters (used by CLI tests).
+- The structured reviewer contract is exported in [`schemas/codex-review.schema.json`](schemas/codex-review.schema.json).
+
+## V0 non-goals
+
+No automatic source implementation, Git commit/PR automation, deployment, production access, web/desktop UI, HTTP server, database persistence, multi-reviewer voting, model router, generic workflow DSL, multi-agent framework, or plugin architecture.

@@ -1,0 +1,289 @@
+"""Review phases: INITIAL_REVIEW, CLOSURE_REVIEW, FINAL_REVIEW.
+
+Codex creates Issues and verifies RESOLVED; the orchestrator computes
+PASS mechanically and routes by budget.
+"""
+
+from __future__ import annotations
+
+from agent_review.agents.base import AgentError
+from agent_review.models import (
+    ExitCode,
+    Issue,
+    IssueCategory,
+    IssueSeverity,
+    IssueStatus,
+    PassResult,
+    Phase,
+)
+
+
+# ---------------------------------------------------------------------------
+# PASS rule
+# ---------------------------------------------------------------------------
+
+
+def compute_pass(
+    issues: list[Issue],
+    active_gate: str | None,
+    proposal_revision: int,
+    task_revision: int,
+) -> PassResult:
+    """Mechanical PASS rule (spec 20). Codex never decides PASS."""
+    open_blocking = [
+        i.id
+        for i in issues
+        if i.severity == IssueSeverity.BLOCKING and i.status == IssueStatus.OPEN
+    ]
+    addressed_blocking = [
+        i.id
+        for i in issues
+        if i.severity == IssueSeverity.BLOCKING and i.status == IssueStatus.ADDRESSED
+    ]
+    need_human = [i.id for i in issues if i.status == IssueStatus.NEED_HUMAN]
+    reasons: list[str] = []
+    if open_blocking:
+        reasons.append(f"OPEN BLOCKING issues: {', '.join(open_blocking)}")
+    if addressed_blocking:
+        reasons.append(
+            f"ADDRESSED BLOCKING issues awaiting verification: {', '.join(addressed_blocking)}"
+        )
+    if need_human:
+        reasons.append(f"NEED_HUMAN issues: {', '.join(need_human)}")
+    if active_gate:
+        reasons.append(f"active Human Gate: {active_gate}")
+    if proposal_revision != task_revision:
+        reasons.append(
+            f"proposal is stale (based_on_task_revision={proposal_revision} != {task_revision})"
+        )
+    return PassResult(
+        passed=not reasons,
+        open_blocking=open_blocking,
+        addressed_blocking=addressed_blocking,
+        need_human=need_human,
+        active_gate=active_gate is not None,
+        stale=proposal_revision != task_revision,
+        reasons=reasons,
+    )
+
+
+# ---------------------------------------------------------------------------
+# shared helpers
+# ---------------------------------------------------------------------------
+
+
+def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> None:
+    """Assign stable IDs and persist issues from a review result."""
+    log = o.store.load_issues()
+    for issue in new_issues:
+        issue.id = f"R{log.next_issue_number:03d}"
+        log.next_issue_number += 1
+        issue.provenance = provenance
+        issue.based_on_task_revision = o.state.task_revision
+        issue.introduced_round = o.state.round
+        log.issues.append(issue)
+        o.event(
+            "ISSUE_CREATED",
+            issue_id=issue.id,
+            severity=issue.severity.value,
+            category=issue.category.value,
+            provenance=provenance,
+        )
+    o.store.save_issues(log)
+
+
+def current_pass(o) -> PassResult:
+    log = o.store.load_issues()
+    proposal = o.store.load_proposal()
+    return compute_pass(
+        log.issues,
+        o.state.active_gate,
+        proposal.based_on_task_revision if proposal else -1,
+        o.state.task_revision,
+    )
+
+
+def _need_human_ids(o) -> list[str]:
+    return [i.id for i in o.store.load_issues().issues if i.status == IssueStatus.NEED_HUMAN]
+
+
+def route_after_failed_pass(o, allow_revision: bool) -> ExitCode | None:
+    """Route when the mechanical PASS rule failed after a review phase.
+
+    NEED_HUMAN issues require a CONVERGENCE Human Gate (M3). Otherwise
+    unresolved blockers consume REVISION (when allowed and not yet used)
+    or ABLATION budget; exhausted budgets are a HUMAN_HANDOFF.
+    """
+    need_human = _need_human_ids(o)
+    if need_human:
+        from agent_review.phases import human_gate
+
+        return human_gate.try_gate_for_need_human_issues(o, need_human)
+
+    if allow_revision and o.state.budgets.revision_used < o.state.limits.max_revision_rounds:
+        o.transition(Phase.REVISION)
+        return None
+    if o.state.budgets.ablation_used < o.state.limits.max_ablation_rounds:
+        o.event("ABLATION_TRIGGERED", reason="blockers unresolved after normal revision/closure")
+        o.transition(Phase.ABLATION)
+        return None
+    o.handoff(
+        "convergence budget exhausted: blocking issues remain unresolved "
+        f"after revision ({o.state.budgets.revision_used}/"
+        f"{o.state.limits.max_revision_rounds}) and ablation "
+        f"({o.state.budgets.ablation_used}/{o.state.limits.max_ablation_rounds})"
+    )
+    return int(ExitCode.HUMAN_HANDOFF)
+
+
+# ---------------------------------------------------------------------------
+# INITIAL_REVIEW
+# ---------------------------------------------------------------------------
+
+
+def run_initial(o) -> ExitCode | None:
+    o.state.round += 1
+    o.event("INITIAL_REVIEW_STARTED", round=o.state.round)
+    contract = o.store.load_contract()
+    proposal = o.store.load_proposal()
+    if contract is None or proposal is None:
+        o.fail("INITIAL_REVIEW reached without contract/proposal")
+        return int(ExitCode.FAILED)
+    result = o.codex.initial_review(o.state, contract, proposal)
+    ingest_new_issues(o, result.issues, provenance="INITIAL_REVIEW")
+    o.event("INITIAL_REVIEW_COMPLETED", issues=len(result.issues))
+    pass_result = current_pass(o)
+    o.event("PASS_COMPUTED", passed=pass_result.passed, reasons=pass_result.reasons)
+    if pass_result.passed:
+        o.transition(Phase.FINALIZE)
+        return None
+    return route_after_failed_pass(o, allow_revision=True)
+
+
+# ---------------------------------------------------------------------------
+# CLOSURE_REVIEW
+# ---------------------------------------------------------------------------
+
+
+def _apply_closure_new_issues(o, new_issues: list[Issue]) -> list[Issue]:
+    """Enforce the closure new-blocker restrictions (spec 19).
+
+    A new BLOCKING issue is allowed only as REGRESSION or a truly severe
+    MISSED_BLOCKER (why_not_detected_initially present); anything else is
+    downgraded to NON_BLOCKING.
+    """
+    processed: list[Issue] = []
+    for issue in new_issues:
+        if issue.severity == IssueSeverity.BLOCKING:
+            allowed = (
+                issue.category == IssueCategory.REGRESSION
+                or bool((issue.why_not_detected_initially or "").strip())
+            )
+            if not allowed:
+                issue.severity = IssueSeverity.NON_BLOCKING
+                issue.resolution = (
+                    "downgraded to NON_BLOCKING: closure review may not raise "
+                    "new BLOCKING issues that are neither REGRESSION nor a "
+                    "severe missed blocker"
+                )
+        processed.append(issue)
+    return processed
+
+
+def run_closure(o) -> ExitCode | None:
+    o.state.round += 1
+    o.event("CLOSURE_REVIEW_STARTED", round=o.state.round)
+    contract = o.store.load_contract()
+    proposal = o.store.load_proposal()
+    if contract is None or proposal is None:
+        o.fail("CLOSURE_REVIEW reached without contract/proposal")
+        return int(ExitCode.FAILED)
+    log = o.store.load_issues()
+    addressed = [
+        i for i in log.issues
+        if i.severity == IssueSeverity.BLOCKING and i.status == IssueStatus.ADDRESSED
+    ]
+
+    result = o.codex.closure_review(o.state, contract, proposal, addressed)
+
+    by_id = {i.id: i for i in log.issues}
+    for outcome in result.issue_outcomes:
+        issue = by_id.get(outcome.issue_id)
+        if issue is None or issue.status != IssueStatus.ADDRESSED:
+            continue  # unknown or already-terminal issues are not mutated
+        if outcome.resolution == "RESOLVED":
+            issue.status = IssueStatus.RESOLVED
+            issue.resolution = outcome.note or "verified against acceptance criteria"
+            o.event("ISSUE_RESOLVED", issue_id=issue.id)
+        else:
+            issue.status = IssueStatus.OPEN
+            issue.resolution = outcome.note or "acceptance criteria not satisfied"
+
+    o.store.save_issues(log)
+    ingest_new_issues(
+        o, _apply_closure_new_issues(o, result.new_issues), provenance="CLOSURE_REVIEW"
+    )
+    o.event("CLOSURE_REVIEW_COMPLETED", outcomes=len(result.issue_outcomes))
+    pass_result = current_pass(o)
+    o.event("PASS_COMPUTED", passed=pass_result.passed, reasons=pass_result.reasons)
+    if pass_result.passed:
+        o.transition(Phase.FINALIZE)
+        return None
+    return route_after_failed_pass(o, allow_revision=False)
+
+
+# ---------------------------------------------------------------------------
+# FINAL_REVIEW (after ABLATION)
+# ---------------------------------------------------------------------------
+
+
+def run_final(o) -> ExitCode | None:
+    o.state.round += 1
+    o.event("FINAL_REVIEW_STARTED", round=o.state.round)
+    contract = o.store.load_contract()
+    proposal = o.store.load_proposal()
+    if contract is None or proposal is None:
+        o.fail("FINAL_REVIEW reached without contract/proposal")
+        return int(ExitCode.FAILED)
+    log = o.store.load_issues()
+    blocking = [
+        i for i in log.issues
+        if i.severity == IssueSeverity.BLOCKING
+        and i.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED)
+    ]
+
+    result = o.codex.final_review(o.state, contract, proposal, blocking)
+
+    ingest_new_issues(o, result.issues, provenance="FINAL_REVIEW")
+
+    # Apply the reviewer verdict mechanically: blockers verified by the
+    # final review are RESOLVED; listed unresolved ones stay unresolved.
+    unresolved = set(result.unresolved_issue_ids)
+    log = o.store.load_issues()
+    for issue in log.issues:
+        if (
+            issue.severity == IssueSeverity.BLOCKING
+            and issue.status == IssueStatus.ADDRESSED
+            and issue.id not in unresolved
+        ):
+            issue.status = IssueStatus.RESOLVED
+            issue.resolution = "verified in final review"
+            o.event("ISSUE_RESOLVED", issue_id=issue.id)
+    o.store.save_issues(log)
+
+    o.event("FINAL_REVIEW_COMPLETED", satisfies_requirement=result.satisfies_requirement)
+    pass_result = current_pass(o)
+    passed = result.satisfies_requirement and pass_result.passed
+    o.event("PASS_COMPUTED", passed=passed, reasons=pass_result.reasons)
+    if passed:
+        o.transition(Phase.FINALIZE)
+        return None
+    o.handoff(
+        "ablation budget exhausted: design still fails requirement or blockers "
+        "remain unresolved after final review"
+    )
+    return int(ExitCode.HUMAN_HANDOFF)
+
+
+def run_closure_unimplemented(o) -> ExitCode | None:  # pragma: no cover
+    raise AgentError("closure review lands in M2")
