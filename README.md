@@ -44,13 +44,25 @@ Core rule:
 
 ## Status
 
-**V0 design frozen; implementation not started.**
+**V0 design frozen. Repository is ready for autonomous implementation.**
 
-The implementation baseline is documented in:
+Execution documents:
 
-- [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEMENTATION_SPEC.md)
+- [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEMENTATION_SPEC.md) — what V0 must implement, protocol contracts, milestones and acceptance criteria.
+- [`docs/V0_AUTONOMOUS.md`](docs/V0_AUTONOMOUS.md) — how an implementation agent must autonomously execute M0→M6, test, repair failures and escalate only real blockers.
 
-## Planned Implementation Shape
+## Autonomous Implementation Trigger
+
+A coding agent can be started with a short instruction:
+
+```text
+Read docs/V0_IMPLEMENTATION_SPEC.md and docs/V0_AUTONOMOUS.md.
+Implement V0 autonomously from the current repository state through M6.
+Follow milestone acceptance gates, run tests and fix failures yourself.
+Do not expand V0 scope. Only stop for a Human Escalation condition defined in V0_AUTONOMOUS.md.
+```
+
+## Planned CLI
 
 ```text
 review "<natural language request>"
