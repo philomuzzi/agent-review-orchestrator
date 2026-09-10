@@ -30,8 +30,12 @@ def test_m0_session_create_and_persist(repo):
     assert state.phase == Phase.INIT
     assert state.task_kind == TaskKind.CHANGE
     assert state.kind_explicit is False
-    assert state.session_id.startswith("20")
-    assert "pause" in state.session_id
+    # V0.1: compact stable id, independent of request wording.
+    import re
+
+    assert re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{4}", state.session_id)
+    assert "pause" not in state.session_id
+    assert state.task_title is None and state.task_title_source is None
 
 
 def test_m0_state_roundtrip_and_events(repo):

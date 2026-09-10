@@ -12,7 +12,11 @@ def run(o) -> ExitCode | None:
     if contract is None:
         o.fail("DESIGN reached without a Change Contract")
         return int(ExitCode.FAILED)
-    result = o.pi.design(o.state, contract, discovery=o.store.load_discovery())
+    result = o.agent_call(
+        "pi",
+        "design",
+        lambda: o.pi.design(o.state, contract, discovery=o.store.load_discovery()),
+    )
     # The orchestrator (not the agent) owns revision bookkeeping.
     result.based_on_task_revision = o.state.task_revision
     o.store.save_proposal(result)

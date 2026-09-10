@@ -139,6 +139,9 @@ class SessionState(BaseModel):
     session_id: str
     repository: str
     request: str
+    # V0.1 presentation metadata; never a routing/state-machine key.
+    task_title: Optional[str] = None
+    task_title_source: Optional[str] = None  # "user" | "discover"
     task_kind: TaskKind = TaskKind.CHANGE
     kind_explicit: bool = False
     phase: Phase = Phase.INIT
@@ -177,6 +180,8 @@ class HumanCandidate(BaseModel):
 
 
 class DiscoveryResult(BaseModel):
+    # Concise semantic task title (V0.1 session presentation).
+    task_title: str = ""
     task_kind: TaskKind = TaskKind.CHANGE
     current_state: str = ""
     relevant_components: list[str] = Field(default_factory=list)

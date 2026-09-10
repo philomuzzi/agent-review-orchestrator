@@ -1,12 +1,16 @@
 """The deterministic orchestration loop.
 
 Owns process state, dispatches phase modules, enforces the state machine,
-exit codes and interruption/failure persistence.
+exit codes and interruption/failure persistence. V0.1: also owns runtime
+progress — every workflow fact flows through ``event()`` into one stream
+feeding both ``events.jsonl`` and the CLI renderer.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -19,6 +23,7 @@ from agent_review.models import (
     SessionStatus,
     TaskKind,
 )
+from agent_review.progress import NullRenderer, ProgressRenderer
 from agent_review.state_machine import assert_transition
 from agent_review.storage import StateStore
 
@@ -56,6 +61,7 @@ class Orchestrator:
         codex,
         config: Config | None = None,
         ui: UI | None = None,
+        renderer: ProgressRenderer | None = None,
     ):
         self.store = store
         self.state = state
@@ -63,6 +69,12 @@ class Orchestrator:
         self.codex = codex
         self.config = config or load_config()
         self.ui = ui or ConsoleUI()
+        self.renderer = renderer or NullRenderer()
+        self.renderer.session_dir = str(store.dir)
+        # Adapter protocol-retry events flow into the same event stream.
+        for adapter in (self.pi, self.codex):
+            if hasattr(adapter, "event_sink"):
+                adapter.event_sink = self._adapter_event
         self._protocol_retries_base = state.budgets.protocol_retries_used
         self._protocol_retries_start = sum(
             getattr(adapter, "protocol_retries_used", 0) for adapter in (pi, codex)
@@ -80,6 +92,8 @@ class Orchestrator:
         pi=None,
         codex=None,
         ui: UI | None = None,
+        renderer: ProgressRenderer | None = None,
+        name: str | None = None,
     ) -> "Orchestrator":
         cfg = config or load_config()
         store = StateStore.create_session(
@@ -87,6 +101,7 @@ class Orchestrator:
             request,
             task_kind_explicit=task_kind_explicit,
             limits=cfg.budgets,
+            name=name,
         )
         state = store.load_state()
         assert state is not None
@@ -98,7 +113,7 @@ class Orchestrator:
             pi_adapter, codex_adapter = build_adapters(
                 cfg, repository=Path(store.repository), store=store
             )
-        return cls(store, state, pi_adapter, codex_adapter, cfg, ui)
+        return cls(store, state, pi_adapter, codex_adapter, cfg, ui, renderer)
 
     @classmethod
     def resume(
@@ -109,6 +124,7 @@ class Orchestrator:
         pi=None,
         codex=None,
         ui: UI | None = None,
+        renderer: ProgressRenderer | None = None,
     ) -> "Orchestrator":
         cfg = config or load_config()
         store = StateStore(repository, session_id)
@@ -124,12 +140,68 @@ class Orchestrator:
             pi_adapter, codex_adapter = build_adapters(
                 cfg, repository=Path(state.repository), store=store
             )
-        return cls(store, state, pi_adapter, codex_adapter, cfg, ui)
+        return cls(store, state, pi_adapter, codex_adapter, cfg, ui, renderer)
 
     # -- primitives ----------------------------------------------------------
 
     def event(self, name: str, **data) -> None:
-        self.store.append_event({"event": name, **data})
+        """Single progress/audit source: events.jsonl + CLI renderer."""
+        finalized = self.store.append_event({"event": name, **data})
+        self.renderer.handle(finalized)
+
+    def _adapter_event(self, name: str, data: dict) -> None:
+        self.event(name, **data)
+
+    def agent_call(self, agent: str, action: str, fn):
+        """Run one agent call with progress events and a heartbeat.
+
+        The heartbeat only says the orchestrator is still waiting on a
+        live call; it never implies model progress or success odds.
+        """
+        phase = self.state.phase.value
+        started = time.monotonic()
+        self.event("AGENT_CALL_STARTED", phase=phase, agent=agent, action=action)
+        stop = threading.Event()
+
+        def _beat() -> None:
+            interval = self.renderer.heartbeat_interval
+            if interval <= 0:
+                return
+            while not stop.wait(interval):
+                self.event(
+                    "AGENT_CALL_HEARTBEAT",
+                    phase=phase,
+                    agent=agent,
+                    action=action,
+                    seconds=round(time.monotonic() - started, 1),
+                )
+
+        thread = threading.Thread(target=_beat, daemon=True)
+        thread.start()
+        try:
+            result = fn()
+        except BaseException as exc:
+            stop.set()
+            thread.join(timeout=2.0)
+            self.event(
+                "AGENT_CALL_FAILED",
+                phase=phase,
+                agent=agent,
+                action=action,
+                error=type(exc).__name__,
+                seconds=round(time.monotonic() - started, 1),
+            )
+            raise
+        stop.set()
+        thread.join(timeout=2.0)
+        self.event(
+            "AGENT_CALL_COMPLETED",
+            phase=phase,
+            agent=agent,
+            action=action,
+            seconds=round(time.monotonic() - started, 1),
+        )
+        return result
 
     def transition(self, new_phase: Phase, status: SessionStatus | None = None) -> None:
         assert_transition(self.state.phase, new_phase)
@@ -179,6 +251,7 @@ class Orchestrator:
         ):
             return int(ExitCode.HUMAN_HANDOFF)
 
+        self.renderer.banner(self.state)
         self._recover_if_needed()
         try:
             self._ensure_agent_capability()
@@ -220,10 +293,10 @@ class Orchestrator:
             Phase.INTERRUPTED,
         ):
             return
-        for adapter in (self.pi, self.codex):
+        for adapter, agent in ((self.pi, "pi"), (self.codex, "codex")):
             ensure = getattr(adapter, "ensure_capability", None)
             if ensure is not None:
-                ensure()
+                self.agent_call(agent, "capability", ensure)
 
     def _recover_if_needed(self) -> None:
         status = self.state.status

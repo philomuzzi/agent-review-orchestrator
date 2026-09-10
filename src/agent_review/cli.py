@@ -5,8 +5,10 @@ The binary maps the invocation style required by the V0 contract:
 - ``review "<request>"``           -> default ``run`` command
 - ``review --repo PATH "<request>"``
 - ``review --kind change "<request>"``
+- ``review --name "title" "<request>"``     (V0.1 presentation title)
+- ``review --verbose`` / ``review --quiet`` (V0.1 output levels)
 - ``review resume [session-id]``
-- ``review status [session-id]``
+- ``review status [session-id] [--list]``
 - ``review show [final|gate|task|proposal|issues] [session-id]``
 """
 
@@ -65,6 +67,30 @@ def _echo_exit(code: ExitCode, message: str) -> None:
     raise typer.Exit(int(code))
 
 
+def _build_renderer(config: Config, verbose: bool, quiet: bool):
+    """Progress renderer honoring --verbose/--quiet (V0.1 spec 8)."""
+    from agent_review.progress import OutputLevel, ProgressRenderer
+
+    if verbose and quiet:
+        typer.secho("--verbose and --quiet are mutually exclusive", fg=typer.colors.RED)
+        raise typer.Exit(ExitCode.FAILED)
+    level = OutputLevel.QUIET if quiet else (OutputLevel.VERBOSE if verbose else OutputLevel.DEFAULT)
+    return ProgressRenderer(
+        level=level, heartbeat_interval=config.progress.heartbeat_seconds
+    )
+
+
+def _session_header_lines(state) -> list[str]:
+    """Short stable ID + semantic title (V0.1 spec 4.4)."""
+    from agent_review.progress import display_title
+
+    return [
+        f"Session: {state.session_id}",
+        f"Task:    {display_title(state)}",
+        f"Repo:    {state.repository}",
+    ]
+
+
 @app.command()
 def run(
     request: str = typer.Argument(..., help="Natural-language review request."),
@@ -76,13 +102,27 @@ def run(
         "--kind",
         help="Task kind: change | problem (default: discovered automatically).",
     ),
+    name: str = typer.Option(
+        None,
+        "--name",
+        help="Explicit session title (overrides the generated task title).",
+    ),
     config_path: str = typer.Option(
         None, "--config", help="Path to config TOML (default: auto-detect)."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Show artifacts, issue IDs, budgets and retry detail."
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", help="Show only gates, errors and the final result."
     ),
 ) -> None:
     """Start a new review session for REQUEST."""
     if kind is not None and kind.lower() not in ("change", "problem"):
         typer.secho("--kind must be 'change' or 'problem'", fg=typer.colors.RED)
+        raise typer.Exit(ExitCode.FAILED)
+    if verbose and quiet:
+        typer.secho("--verbose and --quiet are mutually exclusive", fg=typer.colors.RED)
         raise typer.Exit(ExitCode.FAILED)
 
     repo_path = _repo_path(repo)
@@ -90,11 +130,14 @@ def run(
 
     from agent_review.orchestrator import Orchestrator  # deferred: keeps --help fast
 
+    renderer = _build_renderer(config, verbose, quiet)
     orchestrator = Orchestrator.create(
         repository=repo_path,
         request=request,
         task_kind_explicit=kind,
         config=config,
+        renderer=renderer,
+        name=name,
     )
     _report(orchestrator, repo_path)
 
@@ -103,6 +146,12 @@ def run(
 def resume(
     session_id: str = typer.Argument(None, help="Session id (default: latest unfinished)."),
     repo: str = typer.Option(None, "--repo", help="Target repository."),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Show artifacts, issue IDs, budgets and retry detail."
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", help="Show only gates, errors and the final result."
+    ),
 ) -> None:
     """Resume an interrupted or Human-Gate session."""
     repo_path = _repo_path(repo)
@@ -113,7 +162,10 @@ def resume(
 
     from agent_review.orchestrator import Orchestrator
 
-    orchestrator = Orchestrator.resume(repository=repo_path, session_id=sid, config=config)
+    renderer = _build_renderer(config, verbose, quiet)
+    orchestrator = Orchestrator.resume(
+        repository=repo_path, session_id=sid, config=config, renderer=renderer
+    )
     _report(orchestrator, repo_path)
 
 
@@ -142,9 +194,15 @@ def _report(orchestrator, repo_path: Path) -> None:
 def status(
     session_id: str = typer.Argument(None, help="Session id (default: latest unfinished)."),
     repo: str = typer.Option(None, "--repo", help="Target repository."),
+    list_sessions: bool = typer.Option(
+        False, "--list", help="List recent sessions (id, task title, outcome)."
+    ),
 ) -> None:
     """Report phase, blockers and budgets for a session."""
     repo_path = _repo_path(repo)
+    if list_sessions:
+        _list_sessions(repo_path)
+        raise typer.Exit(ExitCode.DONE)
     sid = _resolve_session(repo_path, session_id)
     if sid is None:
         _echo_exit(ExitCode.FAILED, "No sessions found under .review/")
@@ -158,8 +216,8 @@ def status(
     addressed = [i.id for i in issues if i.severity.value == "BLOCKING" and i.status.value == "ADDRESSED"]
     need_human = [i.id for i in issues if i.status.value == "NEED_HUMAN"]
 
-    typer.echo(f"session:        {state.session_id}")
-    typer.echo(f"repository:     {state.repository}")
+    for line in _session_header_lines(state):
+        typer.echo(line)
     typer.echo(f"task kind:      {state.task_kind.value}")
     typer.echo(f"phase:          {state.phase.value}")
     typer.echo(f"status:         {state.status.value}")
@@ -181,6 +239,34 @@ def status(
     if state.phase == Phase.WAITING_FOR_HUMAN:
         typer.echo("hint:           answer with 'review resume'")
     raise typer.Exit(ExitCode.DONE)
+
+
+def _list_sessions(repo_path: Path) -> None:
+    """Scan-friendly recent-session table (V0.1 spec 4.4)."""
+    from agent_review.progress import PLACEHOLDER_TITLE
+
+    sessions = StateStore.list_sessions(repo_path)
+    if not sessions:
+        typer.echo("No sessions found under .review/")
+        return
+    rows = []
+    for sid in sessions:
+        state = StateStore.load_state_of(repo_path, sid)
+        if state is None:
+            rows.append((None, sid, "(corrupt state)", None))
+            continue
+        title = (state.task_title or "").strip() or PLACEHOLDER_TITLE
+        if state.status == SessionStatus.RUNNING:
+            outcome = f"RUNNING · {state.phase.value}"
+        else:
+            outcome = state.status.value
+        rows.append((state.created_at, sid, title, outcome))
+    # Newest first; corrupt sessions sink to the bottom.
+    rows.sort(key=lambda r: (r[0] is not None, r[0]), reverse=True)
+    typer.echo("Recent sessions (newest first)")
+    typer.echo("")
+    for _created, sid, title, outcome in rows:
+        typer.echo(f"{sid}  {title}  {outcome}")
 
 
 @app.command()
@@ -214,6 +300,11 @@ def show(
         content = store.read_text(filename)
     if content is None:
         _echo_exit(ExitCode.FAILED, f"'{what}' not available yet for session {sid}")
+    state = store.load_state()
+    if state is not None:
+        for line in _session_header_lines(state):
+            typer.echo(line)
+        typer.echo("")
     typer.echo(content.rstrip())
     raise typer.Exit(ExitCode.DONE)
 
@@ -274,7 +365,7 @@ def main() -> None:
     if argv[0] in subcommands or argv[0] in ("--help", "-h", "--version"):
         app()
         return
-    # Default command: `review "<request>" [--repo ...] [--kind ...]`
+    # Default command: `review "<request>" [--repo ...] [--kind ...] [--name ...]`
     sys.argv = [sys.argv[0], "run", *argv]
     app()
 

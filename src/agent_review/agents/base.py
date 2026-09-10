@@ -135,6 +135,41 @@ def run_with_protocol_repair(
     )
 
 
+def protocol_retry_reporter(
+    sink: Callable[[str, dict], None] | None,
+    agent: str,
+    phase: str,
+    schema_name: str = "",
+):
+    """Adapt run_with_protocol_repair callbacks onto the event stream.
+
+    Maps internal repair states onto the stable V0.1 event names:
+    PROTOCOL_RETRY / PROTOCOL_RETRY_SUCCEEDED / PROTOCOL_RETRY_EXHAUSTED.
+    """
+
+    def report(name: str, attempt: int) -> None:
+        if sink is None:
+            return
+        if name == "PROTOCOL_REPAIR_FAILED":
+            sink(
+                "PROTOCOL_RETRY",
+                {"agent": agent, "phase": phase, "next_attempt": attempt + 1,
+                 "schema": schema_name},
+            )
+        elif name == "PROTOCOL_REPAIR_SUCCEEDED":
+            sink(
+                "PROTOCOL_RETRY_SUCCEEDED",
+                {"agent": agent, "phase": phase, "attempt": attempt},
+            )
+        elif name == "PROTOCOL_RETRIES_EXHAUSTED":
+            sink(
+                "PROTOCOL_RETRY_EXHAUSTED",
+                {"agent": agent, "phase": phase, "attempts": attempt},
+            )
+
+    return report
+
+
 class PiAdapter(Protocol):
     def discover(self, state: SessionState) -> DiscoveryResult: ...
     def investigate(self, state: SessionState, discovery=None, decisions=None) -> InvestigationResult: ...

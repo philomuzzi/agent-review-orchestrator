@@ -21,10 +21,23 @@ Requires Python 3.11+. External agents are optional at test time but required fo
 review "给同步任务增加暂停能力，尽量最小改动"
 review --repo /path/to/repo "request"        # default repo: current directory
 review --kind change "request"               # or: problem
+review --name "同步任务暂停" "request"        # explicit presentation title
 review resume [session-id]                   # resume interrupted / gate sessions
 review status [session-id]                   # phase, blockers, budgets
+review status --list                         # recent sessions (id, title, outcome)
 review show [final|gate|task|proposal|issues] [session-id]
 ```
+
+Output levels (V0.1): default shows phase transitions, agent activity,
+heartbeats on long calls, gate/retry/outcome lines; `--verbose` adds
+artifact paths, issue IDs, task revisions and budget state; `--quiet`
+shows only gates, errors and the final result (for scripting/CI).
+
+Sessions live under `.review/<session-id>/` where the id is compact and
+request-independent (`20260910-103638-a7f3`). A semantic `task_title`
+(produced by DISCOVER, overridable with `--name`) is persisted in
+`state.json` and shown by `status` / `resume` / `show` / `status --list`;
+the directory itself is never renamed.
 
 Answer a Human Gate by running `review resume` in a terminal; or read
 `.review/<session>/human-gate.md` and answer later. Non-interactive runs

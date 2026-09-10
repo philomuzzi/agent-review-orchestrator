@@ -9,7 +9,13 @@ from agent_review.rendering import render_investigation
 def run(o) -> ExitCode | None:
     o.event("INVESTIGATE_STARTED")
     decisions = [d for d in o.store.load_decisions().decisions if d.status.value == "ACTIVE"]
-    result = o.pi.investigate(o.state, discovery=o.store.load_discovery(), decisions=decisions)
+    result = o.agent_call(
+        "pi",
+        "investigate",
+        lambda: o.pi.investigate(
+            o.state, discovery=o.store.load_discovery(), decisions=decisions
+        ),
+    )
     result = InvestigationResult.model_validate(result.model_dump())
     o.store.save_investigation(result)
     o.store.write_text("investigation.md", render_investigation(result))

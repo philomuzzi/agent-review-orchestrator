@@ -24,6 +24,7 @@ from typing import Callable
 from agent_review.agents.base import (
     AgentError,
     CapabilityError,
+    protocol_retry_reporter,
     run_with_protocol_repair,
 )
 from agent_review.config import AgentConfig, Config
@@ -383,6 +384,8 @@ class RealPiAdapter:
         self._capability: dict | None = None
         self._active: PiRpcClient | None = None
         self.protocol_retries_used = 0
+        # Set by the orchestrator; protocol retries surface as events.
+        self.event_sink: Callable[[str, dict], None] | None = None
 
     def ensure_capability(self) -> dict:
         if self._capability is None:
@@ -413,6 +416,10 @@ class RealPiAdapter:
             def on_event(name: str, attempt: int) -> None:
                 if name == "PROTOCOL_REPAIR_FAILED":
                     self.protocol_retries_used += 1
+                if self.event_sink is not None:
+                    protocol_retry_reporter(
+                        self.event_sink, "pi", phase, model_cls.__name__
+                    )(name, attempt)
 
             return run_with_protocol_repair(
                 call,

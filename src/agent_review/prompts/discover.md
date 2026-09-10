@@ -29,6 +29,11 @@ Establish facts BEFORE any solutioning:
 - unknowns (facts you could not establish from the repository);
 - human-decision candidates (only decisions a human MUST own).
 
+Also produce `task_title`: a concise semantic title for this request that
+names the problem or change (not the conversation wording). Typically
+10-20 Chinese characters or a comparable short phrase in other languages.
+No timestamp, no repository name, no verbatim prompt truncation.
+
 ## Hard rules
 
 - Do NOT modify anything. You have read-only tools.

@@ -148,7 +148,43 @@ V1    Capability-Based Agent Routing
 
 ---
 
-## 8. 快速备忘
+## 8. V0.1 实施记录（Runtime Progress Visibility，2026-09-10）
+
+V0.1 在 V0 基线上增加运行期可观测性与会话呈现层，未改动任何 V0 语义（PASS、门、预算、恢复、只读边界全部原样）。
+
+### 7.1 结果概览
+
+| 项 | 结果 |
+|---|---|
+| 实现 | 进度渲染器（default/`--verbose`/`--quiet`）、心跳、短稳定 session id、语义 task_title、status/resume/show 会话呈现、`--name`、`status --list` |
+| 确定性测试 | 152 passed（含 28 个 V0.1 新回归），2 smoke skip→真实环境实跑 2 passed |
+| 真实 E2E | pi 0.85.1 + codex 0.154.0 完整会话：DISCOVER→门(3 决策,都按推荐)→task_revision 2→设计→初审→阻塞→改稿（首跑 JSON 缺尾括号→协议修复→FAILED→resume 重试成功）→闭环→DONE，全程心跳可见 |
+
+### 7.2 架构决策
+
+1. **单事件源**：`Orchestrator.event()` 是唯一进度真源，同时写 `events.jsonl` 与 CLI 渲染器；适配器协议重试通过 `event_sink` 回流同一条流。为 V0.3 遥测零改造铺路。心跳也落 events.jsonl（231 条/真实会话，锁序列化后无交错）。`append_event` 加了 `threading.Lock`：心跳线程与主线程并发追加必须串行化。
+2. **心跳由编排器后台线程产生**（`agent_call` 包装器：stop-Event + daemon 线程），渲染器只消费事件。心跳含义严格限定为“仍在等待活跃 agent 调用”，无百分比、无成功率暗示。能力探测（capability probe，真实环境 4–55s）也走同一包装器，否则启动阶段会重新变成黑盒。
+3. **渲染器是纯投影**：未知事件忽略、写流异常吞掉（渲染永不反噬工作流）；无 ANSI 色（符号 → ✓ ! ✗ ↻ 承担语义，Windows 最安全）；不渲染任何 agent 原文。
+4. **session id 与标题彻底分离**：id = `YYYYMMDD-HHMMSS-4hex`（`secrets.token_hex(2)`），目录永不改名；标题三优先级 `--name` > DISCOVER 产出 > 占位符 `Current request`。DiscoveryResult 加了可选 `task_title` 字段，标题由既有 DISCOVER 调用顺带产出，零额外模型调用。真实 Pi 首跑即给出合格标题（「为同步任务添加步骤最大重试计数」，14 字，语义而非截断）。
+5. **级别过滤在渲染器内静态判定**（QUIET_EVENTS / _VERBOSE_EVENTS 白名单），确定性可测；门交互问答走 UI 层不受 --quiet 影响（quiet 模式下门仍可见可答，符合规格）。
+
+### 7.3 新踩坑与验证结论
+
+1. **真实 E2E 再次抓到假适配器抓不到的问题**：Pi 在 revise 阶段两次输出 18921 字符、恰好缺最后一个 `}` 的 JSON（两次字节级相同）。协议修复重发同样缺括号→按规格 FAILED；`review resume` 从 REVISION 边界重跑即成功。结论：fail-closed + 边界恢复链路在真实故障下工作正常；超长结构化输出是 agent 侧现实风险，V0 不猜测修补（不得代 agent 补括号），保持 FAILED+resume 是正确行为。
+2. **PowerShell 5.1 管道捕获会把 UTF-8 字节按 OEM(936) 解码**：真控制台（WriteConsoleW）与 Git Bash/重定向均正常，仅 `review ... | Select-Object` 这类 PS 管道捕获出现乱码。这是 PS 侧解码选择，发射端无法同时满足 msys(UTF-8) 与 PS 管道(GBK)；维持 UTF-8 输出（与 V0 中文门文本一致），文档化而非 hack。**V0 的两处崩溃修复（rich legacy guard、UTF-8 stdio）在新增渲染路径下均未回归**——重定向/管道下无 Errno 22、无原生崩溃。
+3. **驱动脚本必须走 `cli.main()` 入口**：直连 API 的驱动绕过了 `_harness_windows_stdio()`，GBK 控制台立刻花屏。教训：任何打印非 ASCII 的入口都要复用 CLI 的 stdio 加固，而不是各自 print。
+4. **同秒多会话排序**：目录名排序在同秒内随机（后缀随机），`status --list` 必须按 `state.created_at`（微秒）排序而非目录名。
+5. **心跳竞态无害**：失败/完成前一拍心跳可能落在终局事件之后（线程时序），属可接受的外观噪声；AGENTS_CALL_FAILED/COMPLETED 语义不受影响。
+
+### 7.4 衔接提示（给 V0.3）
+
+- 事件流已具备遥测骨架：AGENT_CALL_STARTED/COMPLETED（含耗时）、AGENT_CALL_HEARTBEAT、PROTOCOL_RETRY(_SUCCEEDED/_EXHAUSTED)、ISSUES_INGESTED（含计数与 ID）、TASK_TITLE_SET、SESSION_RESUMED。V0.3 聚合器可直接消费 events.jsonl，不需要新埋点。
+- 可回答的新问题：每阶段 agent 真实时长分布、心跳密度与“卡死”区分、协议重试集中在哪个阶段/哪个 schema、resume 后重试成功率。
+- 未做（按规格非目标）：仪表盘、百分比进度、原始推理展示、目录改名、语义搜索。
+
+---
+
+## 9. 快速备忘
 
 ```bash
 # 安装/升级（editable venv：代码 git pull 即生效）

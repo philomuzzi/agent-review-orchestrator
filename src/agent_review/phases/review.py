@@ -72,9 +72,10 @@ def compute_pass(
 # ---------------------------------------------------------------------------
 
 
-def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> None:
+def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> list[Issue]:
     """Assign stable IDs and persist issues from a review result."""
     log = o.store.load_issues()
+    ingested: list[Issue] = []
     for issue in new_issues:
         issue = issue.model_copy(deep=True)
         issue.status = IssueStatus.OPEN
@@ -88,6 +89,7 @@ def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> None:
         issue.based_on_task_revision = o.state.task_revision
         issue.introduced_round = o.state.round
         log.issues.append(issue)
+        ingested.append(issue)
         o.event(
             "ISSUE_CREATED",
             issue_id=issue.id,
@@ -96,6 +98,19 @@ def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> None:
             provenance=provenance,
         )
     o.store.save_issues(log)
+    o.event(
+        "ISSUES_INGESTED",
+        provenance=provenance,
+        total=len(ingested),
+        blocking=sum(
+            1 for i in ingested if i.severity == IssueSeverity.BLOCKING
+        ),
+        non_blocking=sum(
+            1 for i in ingested if i.severity == IssueSeverity.NON_BLOCKING
+        ),
+        issue_ids=[i.id for i in ingested],
+    )
+    return ingested
 
 
 def current_pass(o) -> PassResult:
@@ -162,9 +177,21 @@ def run_initial(o) -> ExitCode | None:
     if contract is None or proposal is None:
         o.fail("INITIAL_REVIEW reached without contract/proposal")
         return int(ExitCode.FAILED)
-    result = o.codex.initial_review(o.state, contract, proposal)
-    ingest_new_issues(o, result.issues, provenance="INITIAL_REVIEW")
-    o.event("INITIAL_REVIEW_COMPLETED", issues=len(result.issues))
+    result = o.agent_call(
+        "codex",
+        "initial_review",
+        lambda: o.codex.initial_review(o.state, contract, proposal),
+    )
+    ingested = ingest_new_issues(o, result.issues, provenance="INITIAL_REVIEW")
+    blocking = sum(1 for i in ingested if i.severity == IssueSeverity.BLOCKING)
+    non_blocking = sum(1 for i in ingested if i.severity == IssueSeverity.NON_BLOCKING)
+    o.event(
+        "INITIAL_REVIEW_COMPLETED",
+        issues=len(result.issues),
+        blocking=blocking,
+        non_blocking=non_blocking,
+        issue_ids=[i.id for i in ingested],
+    )
     pass_result = current_pass(o)
     o.event("PASS_COMPUTED", passed=pass_result.passed, reasons=pass_result.reasons)
     if pass_result.passed:
@@ -217,9 +244,14 @@ def run_closure(o) -> ExitCode | None:
         if i.severity == IssueSeverity.BLOCKING and i.status == IssueStatus.ADDRESSED
     ]
 
-    result = o.codex.closure_review(o.state, contract, proposal, addressed)
+    result = o.agent_call(
+        "codex",
+        "closure_review",
+        lambda: o.codex.closure_review(o.state, contract, proposal, addressed),
+    )
 
     by_id = {i.id: i for i in log.issues}
+    resolved_here = 0
     for outcome in result.issue_outcomes:
         issue = by_id.get(outcome.issue_id)
         if issue is None or issue.status != IssueStatus.ADDRESSED:
@@ -227,6 +259,7 @@ def run_closure(o) -> ExitCode | None:
         if outcome.resolution == "RESOLVED":
             issue.status = IssueStatus.RESOLVED
             issue.resolution = outcome.note or "verified against acceptance criteria"
+            resolved_here += 1
             o.event("ISSUE_RESOLVED", issue_id=issue.id)
         else:
             issue.status = IssueStatus.OPEN
@@ -236,7 +269,11 @@ def run_closure(o) -> ExitCode | None:
     ingest_new_issues(
         o, result.new_issues, provenance="CLOSURE_REVIEW"
     )
-    o.event("CLOSURE_REVIEW_COMPLETED", outcomes=len(result.issue_outcomes))
+    o.event(
+        "CLOSURE_REVIEW_COMPLETED",
+        outcomes=len(result.issue_outcomes),
+        resolved=resolved_here,
+    )
     pass_result = current_pass(o)
     o.event("PASS_COMPUTED", passed=pass_result.passed, reasons=pass_result.reasons)
     if pass_result.passed:
@@ -265,7 +302,11 @@ def run_final(o) -> ExitCode | None:
         and i.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED)
     ]
 
-    result = o.codex.final_review(o.state, contract, proposal, blocking)
+    result = o.agent_call(
+        "codex",
+        "final_review",
+        lambda: o.codex.final_review(o.state, contract, proposal, blocking),
+    )
 
     ingest_new_issues(o, result.issues, provenance="FINAL_REVIEW")
 

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import unicodedata
+import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,16 +54,14 @@ def _read_json(path: Path) -> Any | None:
         return json.load(fh)
 
 
-def slugify(text: str, max_len: int = 24) -> str:
-    text = unicodedata.normalize("NFKD", text)
-    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip().lower()
-    text = re.sub(r"[\s_-]+", "-", text)
-    return text[:max_len].strip("-") or "session"
+def new_session_id() -> str:
+    """Compact, stable, filesystem-safe id independent of request wording.
 
-
-def new_session_id(request: str) -> str:
+    Format: ``YYYYMMDD-HHMMSS-xxxx`` where the 4-hex suffix is random
+    (spec V0.1 4.1). The directory name is never renamed afterwards.
+    """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return f"{stamp}-{slugify(request)}"
+    return f"{stamp}-{secrets.token_hex(2)}"
 
 
 class StateStore:
@@ -75,6 +73,7 @@ class StateStore:
         self.dir = review_root(self.repository) / session_id
         self.raw_dir = self.dir / "raw"
         self.history_dir = self.dir / "history"
+        self._event_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -84,11 +83,12 @@ class StateStore:
         request: str,
         task_kind_explicit: str | None = None,
         limits=None,
+        name: str | None = None,
     ) -> "StateStore":
         """Create a fresh session directory with input.md and state.json."""
         repo = Path(repository).resolve()
         root = review_root(repo)
-        base = new_session_id(request)
+        base = new_session_id()
         session_id = base
         n = 1
         while (root / session_id).exists():
@@ -112,6 +112,8 @@ class StateStore:
             session_id=session_id,
             repository=str(repo),
             request=request,
+            task_title=(name.strip() or None) if name else None,
+            task_title_source="user" if name and name.strip() else None,
             task_kind=kind,
             kind_explicit=task_kind_explicit is not None,
             phase=Phase.INIT,
@@ -256,11 +258,19 @@ class StateStore:
 
     # -- audit --------------------------------------------------------------
 
-    def append_event(self, event: dict[str, Any]) -> None:
+    def append_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Append one audit/progress event; returns the finalized event.
+
+        Lock-serialized: heartbeat events arrive from a background thread
+        while the main thread appends workflow events.
+        """
         event = {"ts": datetime.now(timezone.utc).isoformat(), **event}
-        self.dir.mkdir(parents=True, exist_ok=True)
-        with open(self.dir / "events.jsonl", "a", encoding="utf-8", newline="\n") as fh:
-            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        line = json.dumps(event, ensure_ascii=False) + "\n"
+        with self._event_lock:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            with open(self.dir / "events.jsonl", "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(line)
+        return event
 
     def append_raw(self, agent: str, phase: str, line: str) -> Path:
         self.raw_dir.mkdir(parents=True, exist_ok=True)

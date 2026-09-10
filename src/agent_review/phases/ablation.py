@@ -37,7 +37,11 @@ def run(o) -> ExitCode | None:
         o.fail("ABLATION reached without contract/proposal")
         return int(ExitCode.FAILED)
 
-    result = o.pi.ablate(o.state, contract, proposal, unresolved)
+    result = o.agent_call(
+        "pi",
+        "ablate",
+        lambda: o.pi.ablate(o.state, contract, proposal, unresolved),
+    )
 
     o.store.archive_proposal(f"superseded by ablation round {o.state.round}")
     result.proposal.based_on_task_revision = o.state.task_revision

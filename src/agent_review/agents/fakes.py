@@ -11,6 +11,7 @@ from typing import Any
 
 from agent_review.agents.base import (
     AgentError,
+    protocol_retry_reporter,
     run_with_protocol_repair,
 )
 from agent_review.models import (
@@ -33,7 +34,10 @@ from agent_review.models import (
 
 
 def default_discovery(state: SessionState) -> DiscoveryResult:
+    # Deterministic semantic title for tests (real title comes from Pi).
+    title = state.request.strip()[:16] or "Review request"
     return DiscoveryResult(
+        task_title=title,
         task_kind=state.task_kind,
         current_state=f"Discovered current state of {state.repository}.",
         relevant_components=["src/"],
@@ -119,6 +123,11 @@ class ScriptedAdapter:
         self.calls: list[tuple[str, Any]] = []
         self.protocol_retries_allowed = 1
         self.protocol_retries_used = 0
+        self.agent_name = "agent"
+        # Set by the orchestrator; protocol retries surface as events.
+        self.event_sink = None
+        self._current_method = ""
+        self._current_model = ""
 
     def _next(self, method: str) -> Any:
         queue = self.script.get(method)
@@ -132,6 +141,8 @@ class ScriptedAdapter:
         self.calls.append((method, arg))
 
     def _run(self, method: str, build_result, model_cls):
+        self._current_method = method
+        self._current_model = model_cls.__name__
         item = self._next(method)
         if isinstance(item, BaseException):
             raise item
@@ -160,18 +171,30 @@ class ScriptedAdapter:
             model_cls,
             method,
             max_retries=self.protocol_retries_allowed,
-            on_event=lambda name, attempt: setattr(
-                self,
-                "protocol_retries_used",
-                self.protocol_retries_used + (1 if name == "PROTOCOL_REPAIR_FAILED" else 0),
-            ),
+            on_event=self._on_protocol_event,
         )
+
+    def _on_protocol_event(self, name: str, attempt: int) -> None:
+        if name == "PROTOCOL_REPAIR_FAILED":
+            self.protocol_retries_used += 1
+        if self.event_sink is not None:
+            reporter = protocol_retry_reporter(
+                self.event_sink,
+                self.agent_name,
+                self._current_method,
+                self._current_model,
+            )
+            reporter(name, attempt)
 
     def abort(self) -> None:  # pragma: no cover - fake has no child process
         pass
 
 
 class FakePiAdapter(ScriptedAdapter):
+    def __init__(self, script=None):
+        super().__init__(script)
+        self.agent_name = "pi"
+
     def discover(self, state: SessionState) -> DiscoveryResult:
         return self._run(
             "discover", lambda: default_discovery(state), DiscoveryResult
@@ -222,6 +245,10 @@ class FakePiAdapter(ScriptedAdapter):
 
 
 class FakeCodexAdapter(ScriptedAdapter):
+    def __init__(self, script=None):
+        super().__init__(script)
+        self.agent_name = "codex"
+
     def initial_review(
         self, state: SessionState, contract: ChangeContract, proposal: DesignResult
     ) -> InitialReviewResult:

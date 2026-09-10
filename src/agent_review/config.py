@@ -30,10 +30,18 @@ class AgentConfig:
 
 
 @dataclass
+class ProgressConfig:
+    """V0.1 runtime progress rendering settings."""
+
+    heartbeat_seconds: float = 15.0
+
+
+@dataclass
 class Config:
     pi: AgentConfig = field(default_factory=AgentConfig)
     codex: AgentConfig = field(default_factory=lambda: AgentConfig(DEFAULT_CODEX_BINARY))
     budgets: BudgetLimits = field(default_factory=BudgetLimits)
+    progress: ProgressConfig = field(default_factory=ProgressConfig)
 
 
 def _apply_section(target: AgentConfig, section: dict) -> None:
@@ -77,4 +85,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     if "protocol_retries" in budgets:
         limits.max_protocol_retries = int(budgets["protocol_retries"])
     config.budgets = limits
+
+    progress = data.get("progress", {})
+    if "heartbeat_seconds" in progress:
+        try:
+            config.progress.heartbeat_seconds = max(
+                0.0, float(progress["heartbeat_seconds"])
+            )
+        except (TypeError, ValueError):
+            pass
     return config

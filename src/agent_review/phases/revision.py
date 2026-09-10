@@ -37,7 +37,11 @@ def run(o) -> ExitCode | None:
         o.fail("REVISION reached without contract/proposal")
         return int(ExitCode.FAILED)
 
-    result = o.pi.revise(o.state, contract, proposal, open_blockers)
+    result = o.agent_call(
+        "pi",
+        "revise",
+        lambda: o.pi.revise(o.state, contract, proposal, open_blockers),
+    )
 
     # Persist the revised proposal; keep the previous one in history/.
     o.store.archive_proposal(f"superseded by revision round {o.state.round}")
