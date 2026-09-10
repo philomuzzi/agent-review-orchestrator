@@ -217,8 +217,21 @@ def show(
     raise typer.Exit(ExitCode.DONE)
 
 
+def _harness_windows_stdio() -> None:
+    """Avoid GBK multi-byte flush failures (EINVAL) on msys/console pipes."""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream.encoding and stream.encoding.lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main() -> None:
     """Entry point routing the spec'd invocation styles onto the Typer app."""
+    _harness_windows_stdio()
     argv = sys.argv[1:]
     subcommands = {"run", "resume", "status", "show"}
     if not argv:
