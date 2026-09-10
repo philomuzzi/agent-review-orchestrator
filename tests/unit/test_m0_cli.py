@@ -44,3 +44,14 @@ def test_status_reports_session(repo):
     assert status.exit_code == 0
     assert "phase:" in status.output
     assert "DONE" in status.output
+
+
+def test_console_guard_disables_rich_legacy_on_non_console():
+    """Non-console stdout must never let rich use Win32 console APIs."""
+    from agent_review.cli import _guard_console_output
+
+    _guard_console_output()  # pytest captures stdout -> not a real console
+    import rich.console
+
+    console = rich.console.Console()
+    assert console.legacy_windows is False

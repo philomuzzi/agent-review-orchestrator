@@ -12,6 +12,7 @@ The binary maps the invocation style required by the V0 contract:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -229,9 +230,42 @@ def _harness_windows_stdio() -> None:
             pass
 
 
+def _guard_console_output() -> None:
+    """Prevent rich from driving Win32 console APIs on a non-console stdout.
+
+    When stdout is redirected or detached (PowerShell pipelines, msys
+    pipes, some terminal hosts), rich's legacy-windows renderer calls
+    kernel32 console functions on an invalid handle: at best
+    ``OSError: [Errno 22]``, at worst a native access violation that
+    crashes python.exe (crash dialog reading 0xFFFFFFFFFFFFFFFF).
+    If stdout is not a real Windows console, force the plain path.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        real_console = kernel32.GetConsoleMode(handle, ctypes.byref(mode)) != 0
+    except Exception:
+        return
+    if real_console:
+        return
+    try:
+        import rich.console
+
+        rich.console.detect_legacy_windows = lambda: False  # type: ignore[assignment]
+    except Exception:
+        pass
+    os.environ.setdefault("NO_COLOR", "1")
+
+
 def main() -> None:
     """Entry point routing the spec'd invocation styles onto the Typer app."""
     _harness_windows_stdio()
+    _guard_console_output()
     argv = sys.argv[1:]
     subcommands = {"run", "resume", "status", "show"}
     if not argv:
