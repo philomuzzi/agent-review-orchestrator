@@ -1,7 +1,7 @@
 # V0 实施经验总结（Lessons Learned）
 
 **范围**：V0 从空仓库到可用（M0–M6）、真实 agent 联调、Windows 环境攻坚、以及第一个真实业务会话（shopify_api）的复盘。
-**用途**：给后续 V0.1/V0.2 的实施者和维护者留一份可复用的经验清单。
+**用途**：给后续 V0.1/V0.3/V0.5 的实施者和维护者留一份可复用的经验清单。
 
 ---
 
@@ -124,14 +124,27 @@ RPC reader 线程里 `queue.get(timeout)` 超时和流关闭最初都返回 `Non
 
 ---
 
-## 7. 对 V0.1 / V0.2 的衔接建议
+## 7. 对 V0.1 / V0.3 / V0.5 的衔接建议
 
-1. **遥测（V0.1）优先回答这些问题**：gate 预算 2 次是否合理？NEED_HUMAN 交接占比多少？哪类请求消耗预算在"歧义澄清"上？——这些直接决定 V0.2 的方向。
-2. 候选小改进（未实现，仅记录）：
+1. **V0.1 先解决 Runtime Progress Visibility**：第一次真实使用已经确认，阶段执行完全黑盒会直接损害信任和可用性。复用 `events.jsonl` 的领域事件，在终端显示 Phase、Agent、耗时、Heartbeat、Retry、Issue 摘要和 Human Gate，不输出原始推理，也不伪造百分比进度。
+2. **遥测（V0.3）优先回答这些问题**：gate 预算 2 次是否合理？NEED_HUMAN 交接占比多少？哪类请求消耗预算在"歧义澄清"上？——这些直接决定 V0.5 的方向。
+3. 候选小改进（未实现，仅记录）：
    - reviewer 打 NEED_HUMAN 时附带决策选项包（把交接变可续跑的门）；
-   - 阶段级控制台进度输出（曾实现后按需求回退，事件流 `events.jsonl` 可 tail 达成同样目的）；
    - `review --version` 与 `review show events` 便利命令。
-3. Windows 崩溃修复（`cfcdbda`）与 UTF-8 加固（`cea4c83`）是环境层基线，V0.1 的遥测采集跑在长会话上时会再次受益于"EOF≠FAILED"这类路径区分。
+4. Windows 崩溃修复（`cfcdbda`）与 UTF-8 加固（`cea4c83`）是环境层基线，后续进度输出和遥测都必须继续覆盖 PowerShell、Git Bash、pipe/redirect 场景。
+
+当前路线：
+
+```text
+V0    Fixed Agent Workflow
+V0.1  Runtime Progress Visibility
+V0.3  Workflow Telemetry
+V0.5  Role-Based Agent Assignment
+V0.7  Multi Reviewer
+V1    Capability-Based Agent Routing
+```
+
+偶数小版本暂时保留，为后续真实体验中必须插队解决的问题留空间。
 
 ---
 
