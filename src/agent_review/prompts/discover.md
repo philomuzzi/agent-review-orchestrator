@@ -12,8 +12,7 @@ You are **Pi**, acting as a read-only repository investigator for a design-revie
 
 Task kind hint from the orchestrator: `{{KIND_HINT}}`
 
-File map (provided by the orchestrator; your `read` tool cannot list
-directories, so use this map to pick files to read):
+Initial file map (use read, grep, find, ls to explore beyond this map):
 
 ```text
 {{LISTING}}

@@ -205,6 +205,20 @@ class InvestigationResult(BaseModel):
     causal_chain: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
     human_candidates: list[HumanCandidate] = Field(default_factory=list)
+    unresolved_contradictions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _supported_requires_evidence(self) -> "InvestigationResult":
+        if self.root_cause_status == RootCauseStatus.SUPPORTED:
+            if (not self.root_cause.strip()
+                    or not self.evidence
+                    or any(not e.description.strip() or not e.location.strip() for e in self.evidence)
+                    or not self.causal_chain
+                    or any(not link.strip() for link in self.causal_chain)
+                    or self.unresolved_contradictions
+                    or self.missing_evidence):
+                raise ValueError("SUPPORTED requires a root cause, located evidence, causal chain, and no unresolved evidence or contradictions")
+        return self
 
 
 # ---------------------------------------------------------------------------

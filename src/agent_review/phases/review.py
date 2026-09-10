@@ -76,6 +76,12 @@ def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> None:
     """Assign stable IDs and persist issues from a review result."""
     log = o.store.load_issues()
     for issue in new_issues:
+        issue = issue.model_copy(deep=True)
+        issue.status = IssueStatus.OPEN
+        issue.addressed_by = None
+        issue.resolution = None
+        if provenance != "INITIAL_REVIEW":
+            issue = _apply_closure_new_issues(o, [issue])[0]
         issue.id = f"R{log.next_issue_number:03d}"
         log.next_issue_number += 1
         issue.provenance = provenance
@@ -104,7 +110,14 @@ def current_pass(o) -> PassResult:
 
 
 def _need_human_ids(o) -> list[str]:
-    return [i.id for i in o.store.load_issues().issues if i.status == IssueStatus.NEED_HUMAN]
+    log = o.store.load_issues()
+    for issue in log.issues:
+        if (issue.severity == IssueSeverity.BLOCKING
+                and issue.category in (IssueCategory.REQUIREMENT, IssueCategory.FACT)
+                and issue.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED)):
+            issue.status = IssueStatus.NEED_HUMAN
+    o.store.save_issues(log)
+    return [i.id for i in log.issues if i.status == IssueStatus.NEED_HUMAN]
 
 
 def route_after_failed_pass(o, allow_revision: bool) -> ExitCode | None:
@@ -221,7 +234,7 @@ def run_closure(o) -> ExitCode | None:
 
     o.store.save_issues(log)
     ingest_new_issues(
-        o, _apply_closure_new_issues(o, result.new_issues), provenance="CLOSURE_REVIEW"
+        o, result.new_issues, provenance="CLOSURE_REVIEW"
     )
     o.event("CLOSURE_REVIEW_COMPLETED", outcomes=len(result.issue_outcomes))
     pass_result = current_pass(o)

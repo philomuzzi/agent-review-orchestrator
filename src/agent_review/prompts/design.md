@@ -11,7 +11,7 @@ that satisfies the current Change Contract — not the most general architecture
 
 `{{REPO}}` (read-only)
 
-File map (your `read` tool cannot list directories; use this map):
+Initial file map (use read, grep, find, ls to explore beyond this map):
 
 ```text
 {{LISTING}}

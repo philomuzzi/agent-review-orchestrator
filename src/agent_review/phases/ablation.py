@@ -12,6 +12,12 @@ from agent_review.rendering import render_ablation, render_proposal
 
 
 def run(o) -> ExitCode | None:
+    from agent_review.phases.review import _need_human_ids
+    from agent_review.phases.human_gate import try_gate_for_need_human_issues
+
+    human_ids = _need_human_ids(o)
+    if human_ids:
+        return try_gate_for_need_human_issues(o, human_ids)
     if o.state.budgets.ablation_used >= o.state.limits.max_ablation_rounds:
         o.fail("ABLATION reached with ablation budget exhausted")
         return int(ExitCode.FAILED)

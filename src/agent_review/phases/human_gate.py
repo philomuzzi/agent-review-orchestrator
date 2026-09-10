@@ -301,6 +301,7 @@ def invalidate_design_basis(o, reason: str) -> None:
             o.event("ISSUE_SUPERSEDED", issue_id=issue.id, reason="task revision changed")
     o.store.save_issues(log)
     o.state.task_revision += 1
+    o.store.save_state(o.state)
     o.event("TASK_REVISION_INCREMENTED", task_revision=o.state.task_revision, reason=reason)
 
 
@@ -452,6 +453,9 @@ def run(o) -> ExitCode | None:
             )
             return int(ExitCode.WAITING_FOR_HUMAN)
         o.store.save_gate_log(gate_log)
+        # Human answers are a durable boundary even if applying decisions
+        # crashes later. Resume can apply them without asking again.
+        o.store.begin_phase()
         validation = validate_answers(gate.answers)
         o.event("HUMAN_GATE_ANSWERS_VALIDATED", result=validation.value)
 

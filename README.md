@@ -78,9 +78,16 @@ Everything lands under the target repository:
 
 Structured JSON is authoritative; Markdown is the human-readable projection.
 
+Each phase uses a durable `phase-checkpoint.json` undo snapshot. Resume restores
+an unfinished phase's artifacts and state together, then reruns that phase.
+Confirmed Human answers are checkpointed before decision application. Proposal
+archiving retains the last valid files; stale designs are excluded from active
+proposal loading. Run only one workflow owner per session. Events and history
+may include attempts rolled back after a crash.
+
 ## Safety model
 
-- **Pi** runs with a read-only tool allowlist (`--tools read`); no edit/write/shell.
+- **Pi** runs with a read-only tool allowlist (`--tools read,grep,find,ls`); no edit/write/shell.
 - **Codex** runs in the `read-only` sandbox.
 - Both adapters probe capability at startup — including a write-probe in a
   scratch directory — and **fail closed** (exit 30) when safe read-only

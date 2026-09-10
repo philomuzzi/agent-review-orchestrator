@@ -2,7 +2,7 @@
 
 Every phase call spawns a fresh process, provides complete phase
 context, collects one structured result and exits (stateless across
-calls). Repository access is read-only: the ``--tools read`` allowlist
+calls). Repository access is read-only: the ``--tools read,grep,find,ls`` allowlist
 plus defense-in-depth write probing in a scratch directory.
 """
 
@@ -43,7 +43,7 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _EOF = object()
 
 # Read-only tool allowlist for design phases (spec 9.1).
-READ_ONLY_TOOLS = ["read"]
+READ_ONLY_TOOLS = ["read", "grep", "find", "ls"]
 
 _STARTUP_ARGS = [
     "--mode",
@@ -81,9 +81,8 @@ SKIP_DIRS = {
 def repository_listing(repository: Path, max_entries: int = 400) -> str:
     """Bounded file listing embedded in Pi prompts.
 
-    Pi's read-only tool allowlist has no directory-listing capability, so
-    the orchestrator (not the agent) provides the map; the agent then reads
-    specific files with `read`.
+    The initial map is a convenience; read-only navigation tools can explore
+    files omitted by this bounded listing.
     """
     entries: list[str] = []
     omitted = 0
@@ -336,7 +335,7 @@ def detect_pi_capability(config: AgentConfig, probe_timeout: float = 240.0) -> d
                 f"pi RPC mode not working: {state.get('error')}"
             )
         # Defense-in-depth: attempt a write inside the scratch dir.
-        # The --tools read allowlist must prevent any file creation.
+        # The --tools read,grep,find,ls allowlist must prevent any file creation.
         marker = scratch_dir / "probe.txt"
         answer = client.prompt(
             "You are being probed for tool availability. Create a new file "
@@ -443,7 +442,7 @@ class RealPiAdapter:
         )
         return self._call("discover", prompt, DiscoveryResult)
 
-    def investigate(self, state: SessionState, discovery=None) -> InvestigationResult:
+    def investigate(self, state: SessionState, discovery=None, decisions=None) -> InvestigationResult:
         discovery_ctx = "(discovery unavailable)"
         if discovery is not None:
             discovery_ctx = _json_compact(json.loads(discovery.model_dump_json()))
@@ -452,6 +451,7 @@ class RealPiAdapter:
             request=state.request,
             repo=str(self.repository),
             discovery=discovery_ctx,
+            decisions=_json_compact([d.model_dump(mode="json") for d in (decisions or [])]),
             listing=repository_listing(self.repository),
             schema=_json_compact(InvestigationResult.model_json_schema()),
         )

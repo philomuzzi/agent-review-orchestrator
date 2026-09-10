@@ -236,6 +236,21 @@ def render_final(
             _bullets(proposal.change_map.affected_components),
         ),
         _section("Explicitly Unchanged", _bullets(proposal.explicitly_unchanged)),
+        _section("Current Flow", proposal.current_flow),
+        _section("Data Model Changes", _bullets(proposal.data_model_changes)),
+        _section("Interface Changes", _bullets(proposal.interface_changes)),
+        _section("State / Lifecycle Changes", _bullets(proposal.state_lifecycle_changes)),
+        _section("Compatibility", _bullets(proposal.compatibility)),
+        _section("Data Changes", _bullets(proposal.change_map.data_changes)),
+        _section("API Changes", _bullets(proposal.change_map.api_changes)),
+        _section("Config Changes", _bullets(proposal.change_map.config_changes)),
+        _section("Behavior Changes", _bullets(proposal.change_map.behavior_changes)),
+        _section("Unchanged Behaviors", _bullets(proposal.change_map.unchanged_behaviors)),
+        _section("Alternatives Considered", _bullets(proposal.alternatives_considered)),
+        _section("Must Preserve", _bullets(contract.must_preserve)),
+        _section("Scope", _bullets(contract.scope)),
+        _section("Known Constraints", _bullets(contract.known_constraints)),
+        _section("Out of Scope", _bullets(contract.out_of_scope)),
     ]
 
     decision_lines = []

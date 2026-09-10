@@ -177,7 +177,7 @@ class FakePiAdapter(ScriptedAdapter):
             "discover", lambda: default_discovery(state), DiscoveryResult
         )
 
-    def investigate(self, state: SessionState, discovery=None) -> InvestigationResult:
+    def investigate(self, state: SessionState, discovery=None, decisions=None) -> InvestigationResult:
         return self._run(
             "investigate", lambda: default_investigation(), InvestigationResult
         )

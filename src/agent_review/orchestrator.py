@@ -63,6 +63,10 @@ class Orchestrator:
         self.codex = codex
         self.config = config or load_config()
         self.ui = ui or ConsoleUI()
+        self._protocol_retries_base = state.budgets.protocol_retries_used
+        self._protocol_retries_start = sum(
+            getattr(adapter, "protocol_retries_used", 0) for adapter in (pi, codex)
+        )
 
     # -- construction -------------------------------------------------------
 
@@ -108,6 +112,7 @@ class Orchestrator:
     ) -> "Orchestrator":
         cfg = config or load_config()
         store = StateStore(repository, session_id)
+        store.recover_phase()
         state = store.load_state()
         if state is None:
             raise AgentError(f"session state missing or corrupt: {store.dir}")
@@ -198,7 +203,7 @@ class Orchestrator:
             return int(ExitCode.FAILED)
 
     def _sync_protocol_retries(self) -> None:
-        total = 0
+        total = self._protocol_retries_base - self._protocol_retries_start
         for adapter in (self.pi, self.codex):
             total += getattr(adapter, "protocol_retries_used", 0)
         if total != self.state.budgets.protocol_retries_used:
@@ -232,6 +237,17 @@ class Orchestrator:
             self.event("SESSION_RESUMED", phase=target.value)
 
     def step(self) -> Optional[int]:
+        self.store.begin_phase()
+        try:
+            code = self._step()
+            self.store.commit_phase()
+            return code
+        except BaseException:
+            self.store.recover_phase()
+            self.state = self.store.load_state()
+            raise
+
+    def _step(self) -> Optional[int]:
         phase = self.state.phase
         if phase == Phase.DONE:
             return int(ExitCode.DONE)

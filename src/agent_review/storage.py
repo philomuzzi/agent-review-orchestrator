@@ -125,6 +125,45 @@ class StateStore:
 
     # -- state -------------------------------------------------------------
 
+    def begin_phase(self) -> None:
+        """Durable undo checkpoint; audit/raw/history are not recovery truth."""
+        files = {
+            p.name: p.read_text(encoding="utf-8")
+            for p in self.dir.iterdir()
+            if p.is_file() and p.suffix in (".json", ".md")
+            and p.name != "phase-checkpoint.json"
+        }
+        _write_json(self.dir / "phase-checkpoint.json", files)
+
+    def commit_phase(self) -> None:
+        (self.dir / "phase-checkpoint.json").unlink(missing_ok=True)
+
+    def recover_phase(self) -> bool:
+        checkpoint = _read_json(self.dir / "phase-checkpoint.json")
+        if checkpoint is None:
+            return False
+        if (not isinstance(checkpoint, dict) or "state.json" not in checkpoint
+                or any(not isinstance(name, str) or Path(name).name != name
+                       or "/" in name or "\\" in name
+                       or name == "phase-checkpoint.json"
+                       or not isinstance(data, str)
+                       for name, data in checkpoint.items())):
+            raise ValueError("invalid phase checkpoint")
+        SessionState.model_validate_json(checkpoint["state.json"])
+        # Restore state last. Keep the checkpoint until restoration completes,
+        # so a second crash during recovery is itself recoverable.
+        for name, data in checkpoint.items():
+            if name != "state.json":
+                _atomic_write(self.dir / name, data)
+        for path in self.dir.iterdir():
+            if (path.is_file() and path.suffix in (".json", ".md")
+                    and path.name != "phase-checkpoint.json"
+                    and path.name not in checkpoint):
+                path.unlink()
+        _atomic_write(self.dir / "state.json", checkpoint["state.json"])
+        self.commit_phase()
+        return True
+
     def save_state(self, state: SessionState) -> None:
         state.updated_at = datetime.now(timezone.utc)
         _write_json(self.dir / "state.json", json.loads(state.model_dump_json()))
@@ -173,22 +212,23 @@ class StateStore:
 
     def load_proposal(self) -> DesignResult | None:
         data = _read_json(self.dir / "proposal.json")
-        return DesignResult.model_validate(data) if data else None
+        proposal = DesignResult.model_validate(data) if data else None
+        state = self.load_state()
+        if proposal and state and proposal.based_on_task_revision != state.task_revision:
+            return None  # retained for recovery, but not an active design
+        return proposal
 
     def archive_proposal(self, reason: str) -> Path | None:
-        """Move the current proposal into history/ marked STALE."""
+        """Copy the current proposal to history; retain the last valid artifact."""
         proposal = self.load_proposal()
         if proposal is None:
             return None
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        from uuid import uuid4
+        stamp = uuid4().hex
         dest = self.history_dir / f"proposal-{stamp}.md"
         payload = self.read_text("proposal.md")
         header = f"> STALE proposal (based_on_task_revision={proposal.based_on_task_revision})\n> Reason: {reason}\n\n"
         _atomic_write(dest, header + (payload or ""))
-        for name in ("proposal.json", "proposal.md", "change-map.json"):
-            p = self.dir / name
-            if p.is_file():
-                p.unlink()
         return dest
 
     # -- issues / decisions / gates ----------------------------------------
