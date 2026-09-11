@@ -33,6 +33,7 @@ from agent_review.models import (
     ChangeContract,
     DesignResult,
     DiscoveryResult,
+    HumanAuthorityCheckResult,
     InvestigationResult,
     RevisionResult,
     SessionState,
@@ -448,6 +449,43 @@ class RealPiAdapter:
             schema=_json_compact(DiscoveryResult.model_json_schema()),
         )
         return self._call("discover", prompt, DiscoveryResult)
+
+    def human_authority_check(
+        self,
+        state: SessionState,
+        issues: list,
+        decisions: list,
+        contract=None,
+    ) -> HumanAuthorityCheckResult:
+        """V0.2 Capability B: classify review-discovered Human authority.
+
+        Read-only semantic judgment: is each blocking REQUIREMENT/FACT
+        issue already covered by an ACTIVE Human Decision, or does it
+        need a new gate-ready decision candidate? The orchestrator
+        mechanically validates the returned packet.
+        """
+        from agent_review.models import HumanAuthorityCheckResult as _R  # noqa: PLC0415
+
+        decisions_ctx = _json_compact(
+            [d.model_dump(mode="json") for d in (decisions or [])]
+        ) or "(no active decisions)"
+        contract_ctx = "(contract unavailable)"
+        if contract is not None:
+            contract_ctx = _json_compact(json.loads(contract.model_dump_json()))
+        issues_ctx = _json_compact(
+            [json.loads(i.model_dump_json()) for i in issues]
+        )
+        prompt = render_prompt(
+            "human_authority_check",
+            request=state.request,
+            repo=str(self.repository),
+            decisions=decisions_ctx,
+            contract=contract_ctx,
+            issues=issues_ctx,
+            task_revision=state.task_revision,
+            schema=_json_compact(_R.model_json_schema()),
+        )
+        return self._call("human_authority_check", prompt, _R)
 
     def investigate(self, state: SessionState, discovery=None, decisions=None) -> InvestigationResult:
         discovery_ctx = "(discovery unavailable)"

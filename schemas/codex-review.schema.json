@@ -114,6 +114,13 @@
               ],
               "default": null,
               "title": "Why Not Detected Initially"
+            },
+            "covered_by_decisions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Covered By Decisions",
+              "type": "array"
             }
           },
           "required": [
@@ -270,6 +277,13 @@
               ],
               "default": null,
               "title": "Why Not Detected Initially"
+            },
+            "covered_by_decisions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Covered By Decisions",
+              "type": "array"
             }
           },
           "required": [
@@ -456,6 +470,13 @@
               ],
               "default": null,
               "title": "Why Not Detected Initially"
+            },
+            "covered_by_decisions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Covered By Decisions",
+              "type": "array"
             }
           },
           "required": [

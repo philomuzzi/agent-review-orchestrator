@@ -16,15 +16,18 @@ from agent_review.agents.base import (
 )
 from agent_review.models import (
     AblationResult,
+    AuthorityOutcome,
     ChangeContract,
     ChangeMap,
     ClosureReviewResult,
     DesignResult,
     DiscoveryResult,
     FinalReviewResult,
+    HumanAuthorityCheckResult,
     InitialReviewResult,
     InvestigationResult,
     Issue,
+    IssueAuthorityOutcome,
     IssueCategory,
     IssueSeverity,
     RevisionResult,
@@ -190,6 +193,25 @@ class ScriptedAdapter:
         pass
 
 
+def default_authority_check(issues: list[Issue]) -> HumanAuthorityCheckResult:
+    """Deterministic default: CANNOT_DETERMINE for every issue.
+
+    Unscripted fake runs fail closed exactly like the V0 boundary: no
+    coverage claim and no candidate packet are invented by the host.
+    Tests that want real routing script ``human_authority_check``.
+    """
+    return HumanAuthorityCheckResult(
+        outcomes=[
+            IssueAuthorityOutcome(
+                issue_id=i.id,
+                outcome=AuthorityOutcome.CANNOT_DETERMINE,
+                rationale="fake adapter default: no scripted authority check",
+            )
+            for i in issues
+        ]
+    )
+
+
 class FakePiAdapter(ScriptedAdapter):
     def __init__(self, script=None):
         super().__init__(script)
@@ -198,6 +220,13 @@ class FakePiAdapter(ScriptedAdapter):
     def discover(self, state: SessionState) -> DiscoveryResult:
         return self._run(
             "discover", lambda: default_discovery(state), DiscoveryResult
+        )
+
+    def human_authority_check(self, state, issues, decisions, contract=None):
+        return self._run(
+            "human_authority_check",
+            lambda: default_authority_check(issues),
+            HumanAuthorityCheckResult,
         )
 
     def investigate(self, state: SessionState, discovery=None, decisions=None) -> InvestigationResult:

@@ -293,7 +293,31 @@ class StateStore:
         return DecisionLog.model_validate(data) if data else DecisionLog()
 
     def save_gate_log(self, log: GateLog) -> None:
+        """Persist the gate log as ONE consistent truth (V0.2 Capability C).
+
+        ``current`` and the ``gates[]`` history entry for the same
+        ``gate_id`` must never diverge: every save mirrors ``current``
+        into its history entry (or appends it when new), so the
+        load→mutate→save path — which broke the in-memory shared
+        reference after a reload — can no longer freeze history at the
+        creation state. ``human-gate.md`` is re-rendered on every save
+        so the markdown projection always reflects the persisted gate
+        truth, not just the creation-time packet.
+        """
+        if log.current is not None:
+            mirrored = False
+            for index, entry in enumerate(log.gates):
+                if entry.gate_id == log.current.gate_id:
+                    log.gates[index] = log.current.model_copy(deep=True)
+                    mirrored = True
+                    break
+            if not mirrored:
+                log.gates.append(log.current.model_copy(deep=True))
         _write_json(self.dir / "human-gate.json", json.loads(log.model_dump_json()))
+        if log.current is not None:
+            from agent_review.rendering import render_gate  # noqa: PLC0415
+
+            self.write_text("human-gate.md", render_gate(log.current))
 
     def load_gate_log(self) -> GateLog:
         data = _read_json(self.dir / "human-gate.json")

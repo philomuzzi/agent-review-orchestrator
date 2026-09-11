@@ -98,6 +98,34 @@ class AnswerValidation(str, Enum):
     QUESTION_ONLY = "QUESTION_ONLY"
 
 
+class AnswerType(str, Enum):
+    """How a Human answered one gate question (V0.2 Capability A).
+
+    OPTION = the answer selected one of the Agent-proposed options;
+    CUSTOM = the Human explicitly entered custom-decision mode and
+    authored an authoritative decision of their own. Unmatched free
+    text is NOT auto-promoted to CUSTOM — it stays an unresolved
+    attempt until superseded by a later valid answer.
+    """
+
+    OPTION = "OPTION"
+    CUSTOM = "CUSTOM"
+
+
+class DecisionSource(str, Enum):
+    OPTION = "OPTION"
+    CUSTOM = "CUSTOM"
+
+
+class AuthorityOutcome(str, Enum):
+    """Result of the Human Authority Check on a blocking
+    REQUIREMENT/FACT issue (V0.2 Capability B)."""
+
+    COVERED_BY_ACTIVE_DECISION = "COVERED_BY_ACTIVE_DECISION"
+    NEEDS_NEW_HUMAN_DECISION = "NEEDS_NEW_HUMAN_DECISION"
+    CANNOT_DETERMINE = "CANNOT_DETERMINE"
+
+
 class DecisionStatus(str, Enum):
     ACTIVE = "ACTIVE"
     SUPERSEDED = "SUPERSEDED"
@@ -340,6 +368,12 @@ class Issue(BaseModel):
     addressed_by: Optional[str] = None
     resolution: Optional[str] = None
     why_not_detected_initially: Optional[str] = None
+    # Orchestrator-owned routing metadata (V0.2): ACTIVE decision ids a
+    # Human Authority Check proved to cover this issue's semantics.
+    # Persisted with the issue so later phase-entry re-checks do not
+    # re-flip it NEED_HUMAN; reset on ingest so the reviewer can never
+    # forge coverage.
+    covered_by_decisions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _blocking_requires_acceptance(self) -> "Issue":
@@ -417,8 +451,26 @@ class GateQuestion(BaseModel):
 class GateAnswer(BaseModel):
     decision_key: str
     raw: str
+    answer_type: AnswerType = AnswerType.OPTION
     option_key: Optional[str] = None
+    custom_text: Optional[str] = None
     matched: bool = False
+
+    @model_validator(mode="after")
+    def _valid_answer_shape(self) -> "GateAnswer":
+        """A valid answer satisfies exactly one of (spec V0.2 4.2):
+        OPTION -> option_key is present; CUSTOM -> custom_text non-empty."""
+        if self.answer_type == AnswerType.CUSTOM:
+            if self.matched and not (self.custom_text or "").strip():
+                raise ValueError(
+                    f"CUSTOM answer for {self.decision_key} requires non-empty "
+                    "custom_text"
+                )
+        elif self.matched and not self.option_key:
+            raise ValueError(
+                f"OPTION answer for {self.decision_key} requires option_key"
+            )
+        return self
 
 
 class HumanGate(BaseModel):
@@ -429,10 +481,29 @@ class HumanGate(BaseModel):
     status: GateStatus = GateStatus.OPEN
     answers: list[GateAnswer] = Field(default_factory=list)
     remaining_candidate_keys: list[str] = Field(default_factory=list)
+    # Convergence provenance (V0.2): review issue ids this gate was
+    # derived from. Empty for normal intake/fact gates.
+    source_issue_ids: list[str] = Field(default_factory=list)
     answered_at: Optional[datetime] = None
 
+    def effective_answers(self) -> list[GateAnswer]:
+        """Latest answer per decision_key (V0.2 Capability D).
+
+        Validation and decision application operate on the latest
+        effective answer per key; historical failed attempts remain in
+        the audit trail but never poison the effective view.
+        """
+        latest: dict[str, GateAnswer] = {}
+        for answer in self.answers:
+            latest[answer.decision_key] = answer
+        return list(latest.values())
+
     def answered_keys(self) -> set[str]:
-        return {a.decision_key for a in self.answers if a.matched}
+        return {
+            a.decision_key
+            for a in self.effective_answers()
+            if a.matched
+        }
 
     def unresolved_questions(self) -> list[GateQuestion]:
         answered = self.answered_keys()
@@ -446,6 +517,7 @@ class Decision(BaseModel):
     question: str
     selected_option_key: Optional[str] = None
     answer_text: str = ""
+    source: DecisionSource = DecisionSource.OPTION
     status: DecisionStatus = DecisionStatus.ACTIVE
     superseded_by: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -459,6 +531,59 @@ class Decision(BaseModel):
 class IssueLog(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
     next_issue_number: int = 1
+
+
+# ---------------------------------------------------------------------------
+# V0.2 Capability B: Human Authority Check (review-discovered decisions)
+# ---------------------------------------------------------------------------
+
+
+class DecisionCandidate(BaseModel):
+    """Gate-ready Human Decision Candidate derived from review issues.
+
+    Structurally the same packet as a normal Human Gate candidate so
+    the orchestrator can validate it with identical rules.
+    """
+
+    category: str
+    question: str
+    why_human: str = ""
+    options: list[GateOption] = Field(default_factory=list)
+    recommendation: Optional[str] = None
+    source_issue_ids: list[str] = Field(default_factory=list)
+
+
+class IssueAuthorityOutcome(BaseModel):
+    issue_id: str
+    outcome: AuthorityOutcome
+    referenced_decision_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    decision_candidate: Optional[DecisionCandidate] = None
+
+    @model_validator(mode="after")
+    def _outcome_shape(self) -> "IssueAuthorityOutcome":
+        if self.outcome == AuthorityOutcome.COVERED_BY_ACTIVE_DECISION:
+            if not self.referenced_decision_ids:
+                raise ValueError(
+                    f"COVERED_BY_ACTIVE_DECISION for {self.issue_id} requires "
+                    "referenced_decision_ids"
+                )
+            if not self.rationale.strip():
+                raise ValueError(
+                    f"COVERED_BY_ACTIVE_DECISION for {self.issue_id} requires "
+                    "a rationale explaining the coverage"
+                )
+        if self.outcome == AuthorityOutcome.NEEDS_NEW_HUMAN_DECISION:
+            if self.decision_candidate is None:
+                raise ValueError(
+                    f"NEEDS_NEW_HUMAN_DECISION for {self.issue_id} requires "
+                    "a decision_candidate packet"
+                )
+        return self
+
+
+class HumanAuthorityCheckResult(BaseModel):
+    outcomes: list[IssueAuthorityOutcome] = Field(default_factory=list)
 
 
 class DecisionLog(BaseModel):

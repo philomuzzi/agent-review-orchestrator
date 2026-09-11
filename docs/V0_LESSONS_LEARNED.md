@@ -286,3 +286,34 @@ review resume           # 答人审门 / 中断恢复
 ```
 
 环境变量：`AGENT_REVIEW_FAKE_ADAPTERS=1`（强制假适配器）、`AGENT_REVIEW_SMOKE=1`（启用真实 smoke）、`AGENT_REVIEW_CONFIG`（配置文件路径）。
+---
+
+## 10. V0.2 实施记录（Human Decision & Convergence，2026-09-11）
+
+V0.2 把人审门从「人类确认」升级为「人类权威」，并把评审期发现的 NEED_HUMAN 从终态交接改成可续跑的收敛门。详见 `docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md` 与 `docs/V0_2_IMPLEMENTATION_AUDIT.md`。
+
+### 10.1 结果概览
+
+| 项 | 结果 |
+|---|---|
+| 实现 | 显式自定义决策、Human Authority Check（Pi 只读判定 + 编排器机械校验）、收敛门、handoff.md、门持久化一致性、有效答案验证、6 个新审计事件 |
+| 确定性测试 | 229 passed（+36 V0.2 回归，含 PROD-001 永久回放），0 回归 |
+| 真实 smoke | 2 passed（pi 0.85.1 / codex 0.154.0，≈153s） |
+| 真实 E2E | 4 个会话：自定义决策（含跨进程 resume 补答）、覆盖路由（真实 REQUIREMENT 阻塞 → COVERED → REVISION → DONE）、收敛门（真实 NEEDS_NEW → HG002 → 自定义答案 → task_revision 3 → 重建）、真实 handoff.md |
+| 已知残留 | 权威判定质量仍属 Pi（结构校验拦不住"格式正确的误判"）；revise 长输出截断复发一次（按 V0.1 既定 FAILED+resume 处理，两次恢复成功） |
+
+### 10.2 新经验
+
+1. **路由状态必须有持久化落点，否则每个相位入口都会"重新路由"**：覆盖判定最初只回写 `resolution` 备注，结果 REVISION 入口的防御性 `_need_human_ids` 又把同一 issue 翻回 NEED_HUMAN、二次消耗权威判定。修复：`Issue.covered_by_decisions`（编排器所有，ingest 时清零防评审员伪造）。教训：**任何"由判定产生的新路由事实"都要变成持久化字段/标记，且要枚举所有会重推导该路由的入口**（相位入口、恢复路径、防御性重查）。
+2. **`allow_revision=False` 在两个调用点语义不同**：closure 路由里它意味着"走消融/交接阶梯"，而 REVISION/ABLATION 入口重查里它意味着"回本相位继续"。一个布尔参数承载两种语义差点造成闭环死循环（closure 返回 None → 相位不变 → 重跑评审）。教训：**路由函数的"继续"出口要显式区分"继续到哪个所有者"**（continue_routing 独立成参），并问一句"返回 None 之后循环会停在哪一步"。
+3. **空输入是 skip 不是 attempt**：交互门里空回车最初也被记录为一条答案，成了"最新有效答案"，把上一轮的 QUESTION_ONLY 降级成 AMBIGUOUS。教训：**有效答案语义引入"最新覆盖"后，所有产生答案的路径（含跳过/EOF/空自定义）都要重新过一遍"它算不算一次尝试"**。
+4. **保留字协议要先查碰撞**：`0`/`custom` 作为自定义决策的保留选择器后，选项 key 与之碰撞会让该题永远进不了自定义模式。处理：候选过滤 + 收敛包校验双入口拒绝碰撞 key。教训：**给交互协议加保留字时，把"谁可能撞上来"写进校验**。
+5. **E2E 场景编排要顺着系统的设计意图找缝**：上游 intake 门本来就优先拦截歧义（架构如此工作），所以"评审期才发现的语义真空"在真实运行里是小概率路径；e2e_d 用"冻结报表契约 + 只在失败日志降级路径上留真空"才稳定触发收敛门。教训：**构造下游才可见的决策真空，要让 intake 能看到的部分全部被请求文本预先决定，让真空长在新设计自身引入的机制上**（alert.log 的写失败处理是 D002 决策的衍生品，intake 不可见）。
+6. **真实收敛门的完整链路含"二次覆盖"**：收敛决策 D004 落地重建后，第二轮评审的新 REQUIREMENT 阻塞又被权威判定按 [D002, D004] 覆盖——一次会话里覆盖与收敛两条路径串联工作，且覆盖标记跨 FAILED→resume 存活。这类串联路径是假适配器很难自然复现的，值得在审计文档里留真实会话证据。
+7. **工具性失败与任务边界要分开出口**：权威判定的 agent 调用失败最初被兜底成交接（exit 10），会把工具故障伪装成业务边界。改为传播 → FAILED（exit 30）+ 相位恢复，只有"合法的 CANNOT_DETERMINE"才走交接。教训：**每加一个 agent 判定点，就多了一类失败，先分类：协议/工具失败 → FAILED；判定内容不可得 → HANDOFF**。
+8. **handoff.md 的信息量来自既有结构化产物**：无需新数据通路——issues.json 的 problem/acceptance/evidence、decisions.json 的 ACTIVE 决策、gate 的待答问题（含预算耗尽时未开成门的候选）直接拼装即可；真实 E2E 的 handoff.md 甚至带上了评审员内存复现的证据链。教训：**交接包是"既有真相的重组"，不是新真相的产生**。
+
+### 10.3 衔接提示（给 V0.3）
+
+- 事件流新增 `ISSUE_NEED_HUMAN`、`ISSUE_HUMAN_AUTHORITY_CHECK_STARTED`、`ISSUE_COVERED_BY_DECISION`、`CONVERGENCE_GATE_CREATED`、`CUSTOM_DECISION_CAPTURED`、`HANDOFF_WRITTEN`，可直接聚合：权威判定三态分布、收敛门占比、自定义决策占比、覆盖误判率（同一 issue 反复被覆盖/重提）。
+- N102/N104（心跳解耦、attempt/commit 语义）仍是 V0.3 前置；权威判定调用已计入 AGENT_CALL_* 事件族。

@@ -81,6 +81,7 @@ def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> list[Issue
         issue.status = IssueStatus.OPEN
         issue.addressed_by = None
         issue.resolution = None
+        issue.covered_by_decisions = []  # reviewer can never forge coverage
         if provenance != "INITIAL_REVIEW":
             issue = _apply_closure_new_issues(o, [issue])[0]
         issue.id = f"R{log.next_issue_number:03d}"
@@ -125,29 +126,42 @@ def current_pass(o) -> PassResult:
 
 
 def _need_human_ids(o) -> list[str]:
+    """Flip BLOCKING REQUIREMENT/FACT issues to NEED_HUMAN — audited.
+
+    The flip itself is a routing state change: since V0.2 every
+    OPEN -> NEED_HUMAN transition emits an explicit ``ISSUE_NEED_HUMAN``
+    event so the audit stream can reconstruct when and why Human
+    authority was invoked for an issue (spec V0.2 9).
+    """
     log = o.store.load_issues()
+    flipped: list[str] = []
     for issue in log.issues:
         if (issue.severity == IssueSeverity.BLOCKING
                 and issue.category in (IssueCategory.REQUIREMENT, IssueCategory.FACT)
-                and issue.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED)):
+                and issue.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED)
+                and not issue.covered_by_decisions):
+            # Issues already proven covered by ACTIVE decisions keep their
+            # blocker status but never re-enter the Human authority path.
             issue.status = IssueStatus.NEED_HUMAN
-    o.store.save_issues(log)
+            flipped.append(issue.id)
+            o.event(
+                "ISSUE_NEED_HUMAN",
+                issue_id=issue.id,
+                category=issue.category.value,
+                reason="blocking REQUIREMENT/FACT issue pending human authority check",
+            )
+    if flipped:
+        o.store.save_issues(log)
     return [i.id for i in log.issues if i.status == IssueStatus.NEED_HUMAN]
 
 
-def route_after_failed_pass(o, allow_revision: bool) -> ExitCode | None:
-    """Route when the mechanical PASS rule failed after a review phase.
+def continue_blocker_routing(o, allow_revision: bool) -> ExitCode | None:
+    """Normal solution-correction ladder for unresolved blockers.
 
-    NEED_HUMAN issues require a CONVERGENCE Human Gate (M3). Otherwise
-    unresolved blockers consume REVISION (when allowed and not yet used)
-    or ABLATION budget; exhausted budgets are a HUMAN_HANDOFF.
+    Shared by ``route_after_failed_pass`` and the V0.2 authority-check
+    routing (issues proven covered by ACTIVE decisions re-enter here
+    instead of terminating the session).
     """
-    need_human = _need_human_ids(o)
-    if need_human:
-        from agent_review.phases import human_gate
-
-        return human_gate.try_gate_for_need_human_issues(o, need_human)
-
     if allow_revision and o.state.budgets.revision_used < o.state.limits.max_revision_rounds:
         o.transition(Phase.REVISION)
         return None
@@ -162,6 +176,28 @@ def route_after_failed_pass(o, allow_revision: bool) -> ExitCode | None:
         f"({o.state.budgets.ablation_used}/{o.state.limits.max_ablation_rounds})"
     )
     return int(ExitCode.HUMAN_HANDOFF)
+
+
+def route_after_failed_pass(o, allow_revision: bool) -> ExitCode | None:
+    """Route when the mechanical PASS rule failed after a review phase.
+
+    V0.2: blocking REQUIREMENT/FACT issues run the Human Authority
+    Check before anything terminal happens — already-decided semantics
+    route back into the correction ladder; genuinely new Human decisions
+    open a bounded Convergence Gate; undeterminable cases fail closed
+    to HUMAN_HANDOFF. Otherwise unresolved blockers consume REVISION
+    (when allowed and not yet used) or ABLATION budget; exhausted
+    budgets are a HUMAN_HANDOFF.
+    """
+    need_human = _need_human_ids(o)
+    if need_human:
+        from agent_review.phases import human_gate
+
+        return human_gate.try_gate_for_need_human_issues(
+            o, need_human, allow_revision=allow_revision
+        )
+
+    return continue_blocker_routing(o, allow_revision)
 
 
 # ---------------------------------------------------------------------------

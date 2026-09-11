@@ -17,7 +17,9 @@ def run(o) -> ExitCode | None:
 
     human_ids = _need_human_ids(o)
     if human_ids:
-        return try_gate_for_need_human_issues(o, human_ids)
+        return try_gate_for_need_human_issues(
+            o, human_ids, continue_routing=False
+        )
     if o.state.budgets.ablation_used >= o.state.limits.max_ablation_rounds:
         o.fail("ABLATION reached with ablation budget exhausted")
         return int(ExitCode.FAILED)

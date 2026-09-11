@@ -25,7 +25,7 @@ review --name "同步任务暂停" "request"        # explicit presentation titl
 review resume [session-id]                   # resume interrupted / gate sessions
 review status [session-id]                   # phase, blockers, budgets
 review status --list                         # recent sessions (id, title, outcome)
-review show [final|gate|task|proposal|issues|events] [session-id]
+review show [final|gate|task|proposal|issues|events|handoff] [session-id]
 review --version                             # package version
 ```
 
@@ -46,12 +46,56 @@ Answer a Human Gate by running `review resume` in a terminal; or read
 `.review/<session>/human-gate.md` and answer later. Non-interactive runs
 (stdin not a TTY) persist the gate packet and exit `20`.
 
+### Human Gate answering (V0.2)
+
+Every gate question lists the Agent-proposed options **plus a reserved
+custom path**:
+
+```text
+1. [option_a] ...
+2. [option_b] ...
+0. [custom] none of the above — I will define the decision
+
+Your answer (number/key/label, 0=custom, '都按推荐', empty to skip):
+```
+
+- `0` / `custom` / `自定义` opens custom-decision mode: your own text
+  becomes an **authoritative session decision** (same semantics as an
+  offered option: ACTIVE decision, `task_revision++`, stale proposals
+  archived, redesign). Custom answers never consume an extra Human
+  interruption.
+- Unmatched free text is **never** promoted to a decision — it stays an
+  unresolved attempt (you can re-answer on a later `review resume`;
+  only the latest answer per question counts).
+- Empty input skips the question; the gate stays open and resumable.
+
+When a review discovers a blocking `REQUIREMENT`/`FACT` issue, the
+orchestrator first runs a **Human Authority Check** against your ACTIVE
+decisions:
+
+- already decided → the issue is routed back into revision as a solution
+  gap (the session does **not** stop just because the reviewer used the
+  REQUIREMENT category);
+- genuinely undecided → a bounded **Convergence Gate** opens (consumes
+  one Human interruption, answer options or custom like any gate); your
+  answer rebuilds the task basis and the same session continues;
+- undeterminable or out of budget → the session terminates with
+  `HUMAN_HANDOFF` and a structured `.review/<session>/handoff.md`
+  (inspect with `review show handoff [session-id]`) describing exactly
+  what the Human needs to decide, the blocking issues and any derivable
+  option packet.
+
+Gate state (`human-gate.json` current/history and `human-gate.md`) stays
+consistent after partial answers, resumes and closes; `review show gate`
+always renders the persisted truth, marking Human-defined decisions
+explicitly.
+
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0    | DONE — `final.md` written |
-| 10   | HUMAN_HANDOFF — task-level boundary (budget exhausted, unresolved fact, real trade-off) |
+| 10   | HUMAN_HANDOFF — task-level boundary (budget exhausted, unresolved fact, real trade-off, undeterminable authority); see `handoff.md` |
 | 20   | WAITING_FOR_HUMAN — gate packet persisted, needs answers |
 | 30   | FAILED — tooling/protocol failure (fails closed) |
 | 130  | INTERRUPTED — Ctrl+C; resume with `review resume` |
@@ -61,14 +105,21 @@ Answer a Human Gate by running `review resume` in a terminal; or read
 ```text
 request → DISCOVER → [INVESTIGATE for problem mode] → INTAKE (Change Contract)
 → [Human Gate only when required] → DESIGN → INITIAL_REVIEW
+→ [Human Authority Check on blocking REQUIREMENT/FACT issues]
 → REVISION if blocked → CLOSURE_REVIEW → ABLATION if unresolved
 → FINAL_REVIEW → FINALIZE → final.md
+   (a genuinely new Human decision found in review opens a Convergence
+    Gate and rebuilds the task basis in the same session)
 ```
 
 Core rules (full contracts in [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEMENTATION_SPEC.md)):
 
 - Human owns requirement semantics; repository owns current-state facts.
+- Every gate question offers the Agent options **and** an explicit custom
+  path — your own decision text is authoritative; unmatched prose is not.
 - Codex raises structured issues; the orchestrator computes PASS mechanically.
+- A blocking REQUIREMENT/FACT issue is checked against your ACTIVE decisions
+  before any Human interruption or handoff (V0.2).
 - Pi may mark an issue ADDRESSED; only Codex verifies RESOLVED.
 - Budgets are hard limits (1 revision, 1 ablation, 2 human interruptions, 1 protocol repair).
 - A human decision that changes the design basis bumps `task_revision`; the old
@@ -98,9 +149,10 @@ Everything lands under the target repository:
 ├── task.md + task.json          # Change Contract
 ├── proposal.md + proposal.json  # current design
 ├── change-map.json, issues.json, decisions.json
-├── human-gate.json + human-gate.md
+├── human-gate.json + human-gate.md   # gate truth (current/history agree)
 ├── state.json                   # authoritative phase/budget state
 ├── ablation.md, final.md
+├── handoff.md                   # written on HUMAN_HANDOFF (V0.2)
 ├── events.jsonl                 # audit trail
 ├── raw/                         # pi-*.jsonl / codex-*.jsonl agent I/O
 └── history/                     # STALE proposals

@@ -230,12 +230,37 @@ class Orchestrator:
         self.store.save_state(self.state)
         self.event("SESSION_FAILED", reason=reason)
 
-    def handoff(self, reason: str) -> None:
+    def handoff(self, reason: str, pending_questions=None) -> None:
+        """Enter HUMAN_HANDOFF and persist a structured handoff package.
+
+        V0.2 Capability E: the handoff is no longer only a one-line
+        reason — ``handoff.md`` records why the workflow stopped, what
+        the Human needs to decide or provide, the blocking issues, the
+        relevant ACTIVE decisions, any derivable suggested options and
+        the resumability boundary. It is an aid for the Human, never a
+        mechanism for the orchestrator to invent decisions.
+        """
         self.state.handoff_reason = reason
         self.state.phase = Phase.HUMAN_HANDOFF
         self.state.status = SessionStatus.HUMAN_HANDOFF
         self.store.save_state(self.state)
         self.event("SESSION_HUMAN_HANDOFF", reason=reason)
+        try:
+            from agent_review.rendering import render_handoff  # noqa: PLC0415
+
+            issues = self.store.load_issues().issues
+            decisions = self.store.load_decisions().decisions
+            gate = self.store.load_gate_log().current
+            package = render_handoff(
+                self.state, issues, decisions, gate, reason,
+                pending_questions=list(pending_questions or []),
+            )
+            self.store.write_text("handoff.md", package)
+            self.event("HANDOFF_WRITTEN", path=str(self.store.dir / "handoff.md"))
+        except Exception:
+            # The handoff package is an aid; its failure must never mask
+            # the terminal handoff state that is already persisted.
+            pass
 
     def _handle_interrupt(self) -> None:
         # Best-effort child abort; adapters without processes no-op.

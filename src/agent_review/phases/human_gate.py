@@ -7,9 +7,13 @@ This module owns:
 - decision packets (max 3 blocking decisions) persisted as
   human-gate.json / human-gate.md;
 - interactive answering with natural-language normalization;
-- COMPLETE / PARTIAL / AMBIGUOUS / QUESTION_ONLY validation;
+- explicit CUSTOM Human Decisions (V0.2 Capability A);
+- COMPLETE / PARTIAL / AMBIGUOUS / QUESTION_ONLY validation over the
+  latest effective answer per decision_key (V0.2 Capability D);
 - append-only decisions with SUPERSEDED semantics;
 - task-revision invalidation of stale designs;
+- the Human Authority Check routing and the Convergence Gate for
+  review-discovered NEED_HUMAN issues (V0.2 Capability B);
 - the Human Interruption Budget.
 """
 
@@ -20,7 +24,11 @@ import re
 
 from agent_review.models import (
     AnswerValidation,
+    AnswerType,
+    AuthorityOutcome,
     Decision,
+    DecisionCandidate,
+    DecisionSource,
     DecisionStatus,
     ExitCode,
     GateAnswer,
@@ -28,13 +36,13 @@ from agent_review.models import (
     GateOption,
     GateQuestion,
     GateStatus,
+    HumanAuthorityCheckResult,
     HumanCandidate,
     HumanGate,
     IssueStatus,
     Phase,
     SessionStatus,
 )
-from agent_review.rendering import render_gate
 
 ALLOWED_CATEGORIES = {c.value for c in GateCategory}
 MAX_QUESTIONS_PER_GATE = 3
@@ -42,19 +50,41 @@ MAX_ANSWER_PASSES = 2  # bounded re-ask rounds before waiting again
 
 GLOBAL_RECOMMEND_ANSWERS = {"都按推荐", "按推荐", "全部按推荐", "all recommended"}
 
+# Explicit custom-decision mode selectors (V0.2 spec 4.1). Only these
+# RESERVED protocol tokens turn free text into an authoritative Human
+# Decision; unmatched prose never acquires Requirement Authority by
+# itself. Option keys must not collide with these tokens (validated
+# in candidate filtering and convergence packet validation).
+CUSTOM_REQUEST_ANSWERS = {
+    "0",
+    "custom",
+    "自定义",
+    "自定义决策",
+    "自己定义",
+    "自己决定",
+}
+
+CUSTOM_DECISION_PROMPT = (
+    "Enter your decision (this becomes an authoritative session decision): "
+)
+
 
 # ---------------------------------------------------------------------------
 # Candidate filtering
 # ---------------------------------------------------------------------------
 
 
-def candidate_decision_key(candidate: HumanCandidate) -> str:
+def candidate_decision_key(category: str, question: str) -> str:
     """Stable decision key derived from the question itself."""
     digest = hashlib.sha1(
-        f"{candidate.category}|{candidate.question}".encode("utf-8")
+        f"{category}|{question}".encode("utf-8")
     ).hexdigest()[:8]
-    prefix = (candidate.category or "DEC")[:4].upper().replace("_", "")
+    prefix = (category or "DEC")[:4].upper().replace("_", "")
     return f"{prefix}-{digest}"
+
+
+def candidate_key_of(candidate: HumanCandidate) -> str:
+    return candidate_decision_key(candidate.category, candidate.question)
 
 
 def eligible_candidates(
@@ -75,8 +105,9 @@ def eligible_candidates(
     }
     eligible: list[HumanCandidate] = []
     suppressed: list[HumanCandidate] = []
+    reserved = {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}
     for candidate in candidates:
-        key = candidate_decision_key(candidate)
+        key = candidate_key_of(candidate)
         if candidate.category not in ALLOWED_CATEGORIES:
             suppressed.append(candidate)
             o.event(
@@ -90,6 +121,13 @@ def eligible_candidates(
                 "HUMAN_CANDIDATE_SUPPRESSED",
                 decision_key=key,
                 reason="fewer than 2 meaningful options",
+            )
+        elif any(_norm(op.key) in reserved for op in candidate.options):
+            suppressed.append(candidate)
+            o.event(
+                "HUMAN_CANDIDATE_SUPPRESSED",
+                decision_key=key,
+                reason="option key collides with the reserved custom-decision selector",
             )
         elif key in decided:
             # Human answer is session fact; never re-ask unless superseded.
@@ -105,7 +143,7 @@ def _to_question(candidate: HumanCandidate) -> GateQuestion:
         for o in candidate.options[:4]
     ]
     return GateQuestion(
-        decision_key=candidate_decision_key(candidate),
+        decision_key=candidate_key_of(candidate),
         category=candidate.category,
         question=candidate.question,
         why_human=candidate.why,
@@ -123,6 +161,7 @@ def create_gate(
     o,
     questions: list[GateQuestion],
     remaining_keys: list[str] | None = None,
+    source_issue_ids: list[str] | None = None,
 ) -> HumanGate | None:
     """Create the decision packet; None means the interruption budget said no."""
     if o.state.budgets.human_interruptions_used >= o.state.limits.max_human_interruptions:
@@ -130,30 +169,45 @@ def create_gate(
             "Human interruption budget exhausted "
             f"({o.state.budgets.human_interruptions_used}/"
             f"{o.state.limits.max_human_interruptions}); unresolved decisions: "
-            + ", ".join(q.decision_key for q in questions)
+            + ", ".join(q.decision_key for q in questions),
+            pending_questions=questions,
         )
         return None
 
     log = o.store.load_gate_log()
+    is_convergence = bool(source_issue_ids)
     gate = HumanGate(
         gate_id=f"HG{log.next_gate_number:03d}",
-        category=GateCategory(questions[0].category) if questions else GateCategory.REQUIREMENT,
+        category=(
+            GateCategory.CONVERGENCE
+            if is_convergence
+            else (GateCategory(questions[0].category) if questions else GateCategory.REQUIREMENT)
+        ),
         created_in_phase=o.state.phase.value,
         questions=questions[:MAX_QUESTIONS_PER_GATE],
         remaining_candidate_keys=remaining_keys or [],
+        source_issue_ids=list(source_issue_ids or []),
     )
     log.next_gate_number += 1
     log.current = gate
     log.gates.append(gate)
-    o.store.save_gate_log(log)
-    o.store.write_text("human-gate.md", render_gate(gate))
+    o.store.save_gate_log(log)  # mirrors current into gates[] + re-renders md
     o.state.active_gate = gate.gate_id
     o.state.budgets.human_interruptions_used += 1
     o.event(
         "HUMAN_GATE_CREATED",
         gate_id=gate.gate_id,
         questions=[q.decision_key for q in gate.questions],
+        category=gate.category.value,
+        source_issue_ids=gate.source_issue_ids,
     )
+    if is_convergence:
+        o.event(
+            "CONVERGENCE_GATE_CREATED",
+            gate_id=gate.gate_id,
+            questions=[q.decision_key for q in gate.questions],
+            source_issue_ids=gate.source_issue_ids,
+        )
     o.transition(Phase.WAITING_FOR_HUMAN, status=SessionStatus.RUNNING)
     return gate
 
@@ -192,6 +246,15 @@ def is_global_recommend(raw: str) -> bool:
     return _norm(raw) in {_norm(a) for a in GLOBAL_RECOMMEND_ANSWERS}
 
 
+def is_custom_request(raw: str) -> bool:
+    """True only for the EXPLICIT custom-decision selectors (spec 4.1).
+
+    Any other unmatched free text stays an unresolved attempt; it never
+    silently becomes an authoritative CUSTOM decision.
+    """
+    return _norm(raw) in CUSTOM_REQUEST_ANSWERS
+
+
 def normalize_answer(question: GateQuestion, raw: str) -> GateAnswer:
     """One answer -> GateAnswer; recommendation shortcut honored only
     when the question actually has a recommended option."""
@@ -219,16 +282,32 @@ def normalize_answer(question: GateQuestion, raw: str) -> GateAnswer:
     return GateAnswer(decision_key=question.decision_key, raw=raw, matched=False)
 
 
+def effective_answers(answers: list[GateAnswer]) -> list[GateAnswer]:
+    """Latest answer per decision_key (V0.2 Capability D)."""
+    latest: dict[str, GateAnswer] = {}
+    for answer in answers:
+        latest[answer.decision_key] = answer
+    return list(latest.values())
+
+
 def validate_answers(answers: list[GateAnswer]) -> AnswerValidation:
-    """Batch validation of gate answers (spec 14)."""
-    if not answers:
+    """Batch validation over the LATEST effective answer per key.
+
+    Historical unmatched attempts stay in the audit trail but no longer
+    make a fully answered gate appear PARTIAL forever: when every gate
+    question has a later valid answer the result must be COMPLETE.
+    """
+    effective = effective_answers(answers)
+    if not effective:
         return AnswerValidation.AMBIGUOUS
-    matched = [a for a in answers if a.matched]
-    if len(matched) == len(answers):
+    matched = [a for a in effective if a.matched]
+    if len(matched) == len(effective):
         return AnswerValidation.COMPLETE
     if matched:
         return AnswerValidation.PARTIAL
-    question_only = all(a.raw.strip().endswith("?") or a.raw.strip().endswith("？") for a in answers)
+    question_only = all(
+        a.raw.strip().endswith("?") or a.raw.strip().endswith("？") for a in effective
+    )
     return AnswerValidation.QUESTION_ONLY if question_only else AnswerValidation.AMBIGUOUS
 
 
@@ -238,11 +317,16 @@ def validate_answers(answers: list[GateAnswer]) -> AnswerValidation:
 
 
 def apply_gate_answers(o, gate: HumanGate) -> list[Decision]:
-    """Append decisions for matched answers; supersede prior ACTIVE ones."""
+    """Append decisions for valid effective answers; supersede prior ACTIVE ones.
+
+    Both offered-option and CUSTOM decisions are first-class: a valid
+    custom decision behaves exactly like a valid offered option (V0.2
+    spec 4.3 / 11.2).
+    """
     log = o.store.load_decisions()
     questions = {q.decision_key: q for q in gate.questions}
     applied: list[Decision] = []
-    for answer in gate.answers:
+    for answer in gate.effective_answers():
         if not answer.matched:
             continue
         question = questions.get(answer.decision_key)
@@ -250,18 +334,26 @@ def apply_gate_answers(o, gate: HumanGate) -> list[Decision]:
             continue
         decision_id = f"D{log.next_decision_number:03d}"
         log.next_decision_number += 1
-        option_label = ""
-        for option in question.options:
-            if option.key == answer.option_key:
-                option_label = option.label
-                break
+        if answer.answer_type == AnswerType.CUSTOM:
+            option_label = ""
+        else:
+            option_label = ""
+            for option in question.options:
+                if option.key == answer.option_key:
+                    option_label = option.label
+                    break
         decision = Decision(
             decision_id=decision_id,
             decision_key=question.decision_key,
             gate_id=gate.gate_id,
             question=question.question,
             selected_option_key=answer.option_key,
-            answer_text=option_label or answer.raw,
+            answer_text=option_label or (answer.custom_text or "") or answer.raw,
+            source=(
+                DecisionSource.CUSTOM
+                if answer.answer_type == AnswerType.CUSTOM
+                else DecisionSource.OPTION
+            ),
             status=DecisionStatus.ACTIVE,
         )
         for prior in log.decisions:
@@ -278,11 +370,19 @@ def apply_gate_answers(o, gate: HumanGate) -> list[Decision]:
                 )
         log.decisions.append(decision)
         applied.append(decision)
+        if answer.answer_type == AnswerType.CUSTOM:
+            o.event(
+                "CUSTOM_DECISION_CAPTURED",
+                decision_id=decision_id,
+                decision_key=question.decision_key,
+                gate_id=gate.gate_id,
+            )
         o.event(
             "DECISION_APPLIED",
             decision_id=decision_id,
             decision_key=question.decision_key,
             option=answer.option_key,
+            source=decision.source.value,
         )
     o.store.save_decisions(log)
     return applied
@@ -372,18 +472,305 @@ def try_gate_for_unresolved_root_cause(o, result) -> ExitCode | None:
     return int(ExitCode.HUMAN_HANDOFF)
 
 
-def try_gate_for_need_human_issues(o, issue_ids) -> ExitCode | None:
-    """NEED_HUMAN issues carry no decision options; V0 hands off."""
-    o.handoff(
-        "issues requiring human authority (no decision packet derivable): "
-        + ", ".join(issue_ids)
+def try_gate_for_need_human_issues(
+    o, issue_ids, allow_revision: bool = True, continue_routing: bool = True
+) -> ExitCode | None:
+    """V0.2: NEED_HUMAN issues go through the Human Authority Check.
+
+    Returns an exit code for terminal outcomes. ``None`` means the
+    routing resolved: either a Convergence Gate was opened (phase moved
+    to WAITING_FOR_HUMAN) or every issue was proven covered by ACTIVE
+    decisions and the normal solution-correction routing continues
+    (``continue_routing=False`` returns to the calling phase's body,
+    which owns the now-OPEN blockers itself).
+    """
+    return resolve_need_human_issues(
+        o, issue_ids, allow_revision=allow_revision, continue_routing=continue_routing
     )
-    return int(ExitCode.HUMAN_HANDOFF)
+
+
+# ---------------------------------------------------------------------------
+# V0.2 Capability B: Human Authority Check + Convergence Gate
+# ---------------------------------------------------------------------------
+
+
+def _authority_input_issues(o, issue_ids: list[str]) -> list:
+    log = o.store.load_issues()
+    by_id = {i.id: i for i in log.issues}
+    return [by_id[i] for i in issue_ids if i in by_id]
+
+
+def _active_decisions(o) -> list[Decision]:
+    return [
+        d
+        for d in o.store.load_decisions().decisions
+        if d.status == DecisionStatus.ACTIVE
+    ]
+
+
+def _validate_candidate_packet(
+    o, candidate: DecisionCandidate, decided_keys: set[str], issue_ids: list[str]
+) -> str | None:
+    """Mechanical validation of a decision candidate packet.
+
+    Returns an error string when the packet must be rejected (fail
+    closed); None when it is gate-ready. Same structural rules as a
+    normal Human Gate candidate (spec V0.2 5.4).
+    """
+    if candidate.category not in ALLOWED_CATEGORIES:
+        return (
+            f"decision candidate category not gate-worthy: "
+            f"{candidate.category!r}"
+        )
+    if not candidate.question.strip():
+        return "decision candidate question is empty"
+    if not (2 <= len(candidate.options) <= 4):
+        return (
+            f"decision candidate for issue(s) {candidate.source_issue_ids or issue_ids} "
+            f"requires 2-4 options, got {len(candidate.options)}"
+        )
+    for option in candidate.options:
+        if not option.key.strip() or not option.label.strip():
+            return "decision candidate options require non-empty key and label"
+        if _norm(option.key) in {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}:
+            return (
+                f"option key {option.key!r} collides with the reserved "
+                "custom-decision selector"
+            )
+    if candidate.recommendation is not None:
+        keys = {option.key for option in candidate.options}
+        if candidate.recommendation not in keys:
+            return (
+                f"decision candidate recommendation {candidate.recommendation!r} "
+                "is not an option key"
+            )
+    key = candidate_decision_key(candidate.category, candidate.question)
+    if key in decided_keys:
+        return (
+            f"decision candidate key {key} is already decided ACTIVE; the "
+            "authority outcome contradicts itself (should have been COVERED)"
+        )
+    if not candidate.source_issue_ids:
+        return "decision candidate requires source_issue_ids"
+    return None
+
+
+def _run_authority_check(o, issue_ids: list[str]) -> HumanAuthorityCheckResult | None:
+    """Ask Pi to classify coverage and derive a candidate packet.
+
+    Returns None when no safe agent judgment is available (adapter
+    lacks the method, or no matching issues remain): the caller fails
+    closed. Adapter tooling/protocol failures propagate as FAILED —
+    only a valid CANNOT_DETERMINE result is a task-level handoff.
+    """
+    issues = _authority_input_issues(o, issue_ids)
+    if not issues:
+        return None
+    checker = getattr(o.pi, "human_authority_check", None)
+    if checker is None:
+        return None
+    decisions = _active_decisions(o)
+    contract = o.store.load_contract()
+    o.event(
+        "ISSUE_HUMAN_AUTHORITY_CHECK_STARTED",
+        issue_ids=[i.id for i in issues],
+        active_decision_ids=[d.decision_id for d in decisions],
+    )
+    # Tooling/protocol failures propagate and fail the session (FAILED)
+    # — only a *valid* CANNOT_DETERMINE result is a task-level handoff.
+    result = o.agent_call(
+        "pi",
+        "human_authority_check",
+        lambda: checker(o.state, issues, decisions, contract),
+    )
+    return HumanAuthorityCheckResult.model_validate(
+        result.model_dump() if hasattr(result, "model_dump") else result
+    )
+
+
+def resolve_need_human_issues(
+    o, issue_ids: list[str], allow_revision: bool = True, continue_routing: bool = True
+) -> ExitCode | None:
+    """Human Authority Check routing (V0.2 spec 5).
+
+    COVERED_BY_ACTIVE_DECISION -> issue reverts to OPEN as a solution
+    coverage gap (provenance preserved) and normal correction routing
+    continues. NEEDS_NEW_HUMAN_DECISION -> Convergence Gate within the
+    interruption budget. Anything undeterminable or invalid fails
+    closed to HUMAN_HANDOFF with a structured handoff package.
+    """
+    result = _run_authority_check(o, issue_ids)
+    if result is None:
+        o.handoff(
+            "human authority check unavailable; cannot determine coverage "
+            "or derive a decision packet for issues: " + ", ".join(issue_ids)
+        )
+        return int(ExitCode.HUMAN_HANDOFF)
+
+    # Mechanical validation BEFORE mutating anything: the mapping must
+    # cover exactly the flipped issues, every outcome must be complete,
+    # and every COVERED reference must be an existing ACTIVE decision.
+    by_issue: dict[str, object] = {}
+    for outcome in result.outcomes:
+        if outcome.issue_id not in issue_ids:
+            o.handoff(
+                "human authority check returned an outcome for an unknown "
+                f"issue {outcome.issue_id!r}; failing closed for: "
+                + ", ".join(issue_ids)
+            )
+            return int(ExitCode.HUMAN_HANDOFF)
+        if outcome.issue_id in by_issue:
+            o.handoff(
+                "human authority check returned duplicate outcomes for "
+                f"{outcome.issue_id}; failing closed for: " + ", ".join(issue_ids)
+            )
+            return int(ExitCode.HUMAN_HANDOFF)
+        by_issue[outcome.issue_id] = outcome
+    missing = [i for i in issue_ids if i not in by_issue]
+    if missing:
+        o.handoff(
+            "human authority check did not classify issues: "
+            + ", ".join(missing)
+        )
+        return int(ExitCode.HUMAN_HANDOFF)
+
+    decisions_by_id = {d.decision_id: d for d in _active_decisions(o)}
+    decided_keys = {
+        d.decision_key for d in _active_decisions(o)
+    }
+
+    covered: list[tuple[object, list[str], str]] = []
+    candidates: list[tuple[object, DecisionCandidate]] = []
+    for issue_id in issue_ids:
+        outcome = by_issue[issue_id]
+        if outcome.outcome == AuthorityOutcome.COVERED_BY_ACTIVE_DECISION:
+            bad = [
+                d for d in outcome.referenced_decision_ids if d not in decisions_by_id
+            ]
+            if bad:
+                o.handoff(
+                    f"coverage claim for {issue_id} references non-ACTIVE or "
+                    f"nonexistent decisions {bad}; failing closed"
+                )
+                return int(ExitCode.HUMAN_HANDOFF)
+            covered.append((outcome, outcome.referenced_decision_ids, outcome.rationale))
+        elif outcome.outcome == AuthorityOutcome.NEEDS_NEW_HUMAN_DECISION:
+            candidate = outcome.decision_candidate
+            error = _validate_candidate_packet(
+                o, candidate, decided_keys, [issue_id]
+            )
+            if error is not None:
+                o.handoff(
+                    f"invalid decision candidate for {issue_id}: {error}; "
+                    "failing closed"
+                )
+                return int(ExitCode.HUMAN_HANDOFF)
+            candidates.append((outcome, candidate))
+        else:  # CANNOT_DETERMINE
+            o.handoff(
+                "human authority could not be determined for issue(s): "
+                + ", ".join(issue_ids)
+                + (
+                    f" ({outcome.rationale.strip()})"
+                    if outcome.rationale.strip()
+                    else ""
+                )
+            )
+            return int(ExitCode.HUMAN_HANDOFF)
+
+    # All outcomes validated — now apply the routing.
+    if covered:
+        log = o.store.load_issues()
+        for outcome, decision_ids, rationale in covered:
+            for issue in log.issues:
+                if issue.id == outcome.issue_id:
+                    # Solution coverage gap, not missing Human semantics:
+                    # back to OPEN for the normal correction path. The
+                    # original reviewer category/provenance stays intact;
+                    # the durable covered_by_decisions marker keeps later
+                    # phase-entry re-checks from re-flipping the issue,
+                    # and the routing note records the finding.
+                    issue.status = IssueStatus.OPEN
+                    issue.covered_by_decisions = list(decision_ids)
+                    issue.resolution = (
+                        "human authority check: semantics already decided by "
+                        + ", ".join(decision_ids)
+                        + " — routed as a solution coverage gap"
+                    )
+                    o.event(
+                        "ISSUE_COVERED_BY_DECISION",
+                        issue_id=issue.id,
+                        decision_ids=decision_ids,
+                    )
+                    break
+        o.store.save_issues(log)
+
+    if not candidates:
+        # Pure coverage: continue the normal solution-correction ladder.
+        if not continue_routing:
+            # Called from a phase that already owns correction (REVISION /
+            # ABLATION entry re-check); the caller proceeds with the
+            # reverted OPEN blockers itself.
+            return None
+        from agent_review.phases.review import continue_blocker_routing
+
+        return continue_blocker_routing(o, allow_revision=allow_revision)
+
+    # New Human-owned decisions discovered: open a Convergence Gate.
+    questions: list[GateQuestion] = []
+    gate_source_issues: list[str] = []
+    for _outcome, candidate in candidates:
+        questions.append(
+            GateQuestion(
+                decision_key=candidate_decision_key(candidate.category, candidate.question),
+                category=candidate.category,
+                question=candidate.question,
+                why_human=candidate.why_human,
+                options=[
+                    GateOption(key=op.key, label=op.label, impact=op.impact)
+                    for op in candidate.options[:4]
+                ],
+                recommendation=candidate.recommendation,
+            )
+        )
+        gate_source_issues.extend(
+            i for i in candidate.source_issue_ids if i in issue_ids
+        )
+    remaining: list[str] = []
+    if len(questions) > MAX_QUESTIONS_PER_GATE:
+        remaining = [q.decision_key for q in questions[MAX_QUESTIONS_PER_GATE:]]
+        questions = questions[:MAX_QUESTIONS_PER_GATE]
+        o.event(
+            "REQUIREMENT_TOO_AMBIGUOUS",
+            asked=[q.decision_key for q in questions],
+            deferred=remaining,
+        )
+    gate = create_gate(
+        o, questions, remaining_keys=remaining, source_issue_ids=gate_source_issues
+    )
+    if gate is None:
+        # Budget exhausted: create_gate already generated the handoff
+        # package with the pending questions.
+        return int(ExitCode.HUMAN_HANDOFF)
+    return None
 
 
 # ---------------------------------------------------------------------------
 # WAITING_FOR_HUMAN execution
 # ---------------------------------------------------------------------------
+
+
+def _print_question(o, question: GateQuestion) -> None:
+    o.ui.echo("")
+    o.ui.echo(f"[{question.category}] {question.decision_key}: {question.question}")
+    if question.why_human:
+        o.ui.echo(f"  why human: {question.why_human}")
+    for index, option in enumerate(question.options, 1):
+        marker = " (recommended)" if question.recommendation == option.key else ""
+        o.ui.echo(f"  {index}. [{option.key}] {option.label}{marker}")
+        if option.impact:
+            o.ui.echo(f"     impact: {option.impact}")
+    o.ui.echo("  0. [custom] none of the above — I will define the decision")
 
 
 def _ask_pass(o, gate: HumanGate) -> list[GateAnswer]:
@@ -392,16 +779,16 @@ def _ask_pass(o, gate: HumanGate) -> list[GateAnswer]:
     for question in list(gate.unresolved_questions()):
         if question.decision_key in gate.answered_keys():
             continue  # answered by a global shortcut within this pass
-        o.ui.echo("")
-        o.ui.echo(f"[{question.category}] {question.decision_key}: {question.question}")
-        if question.why_human:
-            o.ui.echo(f"  why human: {question.why_human}")
-        for index, option in enumerate(question.options, 1):
-            marker = " (recommended)" if question.recommendation == option.key else ""
-            o.ui.echo(f"  {index}. [{option.key}] {option.label}{marker}")
-            if option.impact:
-                o.ui.echo(f"     impact: {option.impact}")
-        raw = o.ui.ask("Your answer (number/key/label, '都按推荐', empty to skip): ")
+        _print_question(o, question)
+        raw = o.ui.ask(
+            "Your answer (number/key/label, 0=custom, '都按推荐', empty to skip): "
+        )
+        if not raw.strip():
+            # Empty input = leave unresolved (skip). A skip is not an
+            # attempt: recording it would make it the latest effective
+            # answer and degrade earlier question-like attempts.
+            o.ui.echo(f"  {question.decision_key} left unresolved")
+            continue
         if is_global_recommend(raw):
             # Global shortcut applies to every unresolved question that has
             # a recommendation; questions without one stay unresolved.
@@ -421,13 +808,34 @@ def _ask_pass(o, gate: HumanGate) -> list[GateAnswer]:
             if answered_any:
                 continue
             continue
+        if is_custom_request(raw):
+            # Explicit custom-decision mode (V0.2 Capability A): only here
+            # may free text become an authoritative Human Decision.
+            custom_text = o.ui.ask(CUSTOM_DECISION_PROMPT).strip()
+            if not custom_text:
+                o.ui.echo(
+                    "  empty custom decision; the question stays unresolved"
+                )
+                continue
+            answer = GateAnswer(
+                decision_key=question.decision_key,
+                raw=raw,
+                answer_type=AnswerType.CUSTOM,
+                custom_text=custom_text,
+                matched=True,
+            )
+            gate.answers.append(answer)
+            new_answers.append(answer)
+            o.ui.echo("  recorded as your authoritative decision")
+            continue
         answer = normalize_answer(question, raw)
         gate.answers.append(answer)
         new_answers.append(answer)
         if not answer.matched:
             o.ui.echo(
                 f"  could not map '{raw.strip()}' to an option for "
-                f"{question.decision_key}; it stays unresolved"
+                f"{question.decision_key}; it stays unresolved "
+                "(use 0/custom to define your own decision)"
             )
     return new_answers
 

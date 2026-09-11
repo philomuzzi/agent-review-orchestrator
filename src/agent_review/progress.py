@@ -55,6 +55,7 @@ AGENT_NAMES = {"pi": "Pi", "codex": "Codex"}
 # Terminal-session events always worth one line, even in --quiet.
 QUIET_EVENTS = {
     "HUMAN_GATE_CREATED",
+    "CONVERGENCE_GATE_CREATED",
     "HUMAN_GATE_WAITING_NONINTERACTIVE",
     "SESSION_DONE",
     "SESSION_HUMAN_HANDOFF",
@@ -388,6 +389,10 @@ class ProgressRenderer:
         if action == "capability":
             self._write(f"{self._stamp(event)} {SYMBOL_START} checking {agent} availability...")
             return
+        if action == "human_authority_check":
+            self._ensure_phase_header(event, phase)
+            self._write(f"         {agent} checking human authority coverage...")
+            return
         if phase in AGENT_ACTIVITY:
             self._ensure_phase_header(event, phase)
             self._write(f"         {AGENT_ACTIVITY[phase]}")
@@ -493,6 +498,43 @@ class ProgressRenderer:
             line += f" [{gate_id}: {', '.join(questions)}]"
         self._write(line)
 
+    def _on_convergence_gate_created(self, event: dict) -> None:
+        # V0.2: a review-discovered Human decision re-enters a bounded
+        # gate instead of terminating the session.
+        self._phase_header_shown = False
+        gate_id = event.get("gate_id", "")
+        questions = event.get("questions", [])
+        source = event.get("source_issue_ids", [])
+        line = (
+            f"{self._stamp(event)} {SYMBOL_GATE} CONVERGENCE GATE · "
+            f"{len(questions)} decision(s) from review issue(s) "
+            f"{', '.join(source) or '-'}"
+        )
+        if self._verbose():
+            line += f" [{gate_id}: {', '.join(questions)}]"
+        self._write(line)
+
+    def _on_issue_need_human(self, event: dict) -> None:
+        # Routing fact (V0.2 audit): OPEN -> NEED_HUMAN never happens
+        # silently; the line makes the authority question visible.
+        issue_id = event.get("issue_id", "")
+        category = event.get("category", "")
+        self._write(
+            f"{self._stamp(event)} {SYMBOL_GATE} issue {issue_id} requires "
+            f"human authority ({category}) — checking decision coverage"
+        )
+
+    def _on_issue_covered_by_decision(self, event: dict) -> None:
+        # The PROD-001 trust fix: requirement blockers already decided by
+        # ACTIVE Human Decisions route to revision, not to termination.
+        issue_id = event.get("issue_id", "")
+        decision_ids = event.get("decision_ids", [])
+        self._write(
+            f"{self._stamp(event)} {SYMBOL_DONE} issue {issue_id} already "
+            f"decided by {', '.join(decision_ids) or '-'} · routed as a "
+            "solution gap"
+        )
+
     def _on_human_gate_waiting_noninteractive(self, event: dict) -> None:
         self._write(
             f"{self._stamp(event)} {SYMBOL_GATE} HUMAN GATE waiting for answers "
@@ -526,10 +568,13 @@ class ProgressRenderer:
     _VERBOSE_EVENTS = {
         "DECISION_APPLIED",
         "DECISION_SUPERSEDED",
+        "CUSTOM_DECISION_CAPTURED",
         "HUMAN_CANDIDATE_SUPPRESSED",
         "REQUIREMENT_TOO_AMBIGUOUS",
         "HUMAN_GATE_ANSWERS_VALIDATED",
         "HUMAN_GATE_ASKING",
+        "ISSUE_HUMAN_AUTHORITY_CHECK_STARTED",
+        "HANDOFF_WRITTEN",
         "PROPOSAL_STALE",
         "ISSUE_ADDRESSED",
         "ISSUE_SUPERSEDED",

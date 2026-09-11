@@ -1,6 +1,6 @@
 # Agent Review Orchestrator V0.2 Human Decision & Convergence Specification
 
-**Status:** Proposed for implementation
+**Status:** Implemented — deterministic suite green (229 passed), real Pi/Codex smoke green, real-agent E2E validated (custom decision, decision coverage, convergence gate, structured handoff). See `docs/V0_2_IMPLEMENTATION_AUDIT.md`.
 **Target:** V0.2
 **Baseline:** V0.1-RC3
 **Primary evidence:** `docs/V0_1_CASE_AUDIT_20260911_PROD001_HANDOFF.md`

@@ -30,7 +30,14 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
         Phase.WAITING_FOR_HUMAN,
         Phase.HUMAN_HANDOFF,
     },
-    Phase.REVISION: {Phase.CLOSURE_REVIEW},
+    Phase.REVISION: {
+        Phase.CLOSURE_REVIEW,
+        # V0.2: a Convergence Gate may open from within the correction
+        # phases when a review-discovered decision cannot be resolved
+        # by revision/ablation alone.
+        Phase.WAITING_FOR_HUMAN,
+        Phase.HUMAN_HANDOFF,
+    },
     Phase.CLOSURE_REVIEW: {
         Phase.REVISION,
         Phase.ABLATION,
@@ -38,7 +45,11 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
         Phase.WAITING_FOR_HUMAN,
         Phase.HUMAN_HANDOFF,
     },
-    Phase.ABLATION: {Phase.FINAL_REVIEW},
+    Phase.ABLATION: {
+        Phase.FINAL_REVIEW,
+        Phase.WAITING_FOR_HUMAN,
+        Phase.HUMAN_HANDOFF,
+    },
     Phase.FINAL_REVIEW: {Phase.FINALIZE, Phase.HUMAN_HANDOFF},
     Phase.FINALIZE: {Phase.DONE},
     # Terminal states: no outbound transitions.

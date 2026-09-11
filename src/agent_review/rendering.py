@@ -167,13 +167,17 @@ def render_gate(gate: HumanGate) -> str:
         f"- category: {gate.category.value}",
         f"- created in phase: {gate.created_in_phase}",
         f"- status: {gate.status.value}",
-        "",
     ]
-    for q in gate.questions:
-        answered = next(
-            (a for a in gate.answers if a.decision_key == q.decision_key and a.matched),
-            None,
+    if gate.source_issue_ids:
+        parts.append(
+            f"- derived from review issues: {', '.join(gate.source_issue_ids)}"
         )
+    if gate.answered_at is not None:
+        parts.append(f"- answered at: {gate.answered_at.isoformat()}")
+    parts.append("")
+    effective = {a.decision_key: a for a in gate.effective_answers()}
+    for q in gate.questions:
+        answer = effective.get(q.decision_key)
         category = f" [{q.category}]" if q.category else ""
         parts.append(f"## {q.decision_key}{category}: {q.question}")
         parts.append("")
@@ -185,14 +189,153 @@ def render_gate(gate: HumanGate) -> str:
             parts.append(f"{idx}. [{opt.key}] {opt.label}{marker}")
             if opt.impact:
                 parts.append(f"   impact: {opt.impact}")
-        if answered:
+        parts.append("0. [custom] none of the above — define your own decision")
+        if answer is not None and answer.matched:
             parts.append("")
-            parts.append(f"**Answered: {answered.option_key}** (raw: {answered.raw})")
+            if answer.answer_type.value == "CUSTOM":
+                # Human-defined decision — never presented as an Agent
+                # recommendation (V0.2 spec 12).
+                parts.append(
+                    f"**Human-defined decision: {answer.custom_text}**"
+                )
+            else:
+                parts.append(
+                    f"**Answered: {answer.option_key}** (raw: {answer.raw})"
+                )
+        attempts = [
+            a for a in gate.answers if a.decision_key == q.decision_key
+        ]
+        failed = [a for a in attempts if not a.matched]
+        if failed:
+            parts.append("")
+            parts.append(
+                f"- unanswered attempts (superseded, kept for audit): "
+                + "; ".join(a.raw or "(empty)" for a in failed)
+            )
         parts.append("")
     parts.append(
-        "Answer options by number or key. You may answer each question "
-        "separately; '都按推荐' applies recommended options where present."
+        "Answer options by number or key; 0/custom enters custom-decision "
+        "mode where your own text becomes an authoritative session "
+        "decision; '都按推荐' applies recommended options where present."
     )
+    return "\n".join(parts)
+
+
+def render_handoff(
+    state,
+    issues: list[Issue],
+    decisions: list[Decision],
+    gate: HumanGate | None,
+    reason: str,
+    pending_questions: list = None,
+) -> str:
+    """Structured HUMAN_HANDOFF package (V0.2 spec 8).
+
+    Composed only from persisted artifacts: it reconstructs what the
+    Human needs to decide without inventing decisions for them.
+    """
+    pending_questions = list(pending_questions or [])
+    blocking = [
+        i
+        for i in issues
+        if i.severity == IssueSeverity.BLOCKING
+        and i.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED, IssueStatus.NEED_HUMAN)
+    ]
+    active = [d for d in decisions if d.status.value == "ACTIVE"]
+
+    parts = ["# Human Handoff", "", _section("Why the workflow stopped", reason)]
+
+    decide_lines: list[str] = []
+    for i in blocking:
+        if i.status == IssueStatus.NEED_HUMAN:
+            decide_lines.append(
+                f"- {i.id} [{i.category.value}]: {i.title} — a Human-owned "
+                "decision or fact is required before the design can converge"
+            )
+    for q in pending_questions:
+        decide_lines.append(f"- pending gate question {q.decision_key}: {q.question}")
+    if gate is not None and gate.status.value == "OPEN":
+        for q in gate.unresolved_questions():
+            decide_lines.append(
+                f"- open gate question {q.decision_key}: {q.question}"
+            )
+    if not decide_lines:
+        decide_lines = ["- (no explicit decision packet derivable — see blocking issues)"]
+    parts.append(_section("What the Human needs to decide / provide", decide_lines))
+
+    issue_lines: list[str] = []
+    for i in blocking:
+        issue_lines.append(f"### {i.id} [{i.category.value} / {i.status.value}] {i.title}")
+        if i.problem:
+            issue_lines.append(f"- problem: {i.problem}")
+        if i.impact:
+            issue_lines.append(f"- impact: {i.impact}")
+        if i.acceptance:
+            issue_lines.append("- acceptance: " + "; ".join(i.acceptance))
+        if i.evidence:
+            issue_lines.append("- evidence: " + "; ".join(i.evidence))
+        if i.resolution:
+            issue_lines.append(f"- note: {i.resolution}")
+        issue_lines.append("")
+    parts.append(_section("Blocking Issues", issue_lines or ["- (none)"]))
+
+    decision_lines = [
+        f"- {d.decision_id} [{d.decision_key}] {d.question} -> "
+        f"**{d.selected_option_key or d.answer_text}**"
+        + (" (human-defined)" if d.source.value == "CUSTOM" else "")
+        for d in active
+    ]
+    parts.append(_section("Relevant Active Decisions", decision_lines or ["- (none)"]))
+
+    option_lines: list[str] = []
+    for q in pending_questions:
+        option_lines.append(f"### {q.decision_key}: {q.question}")
+        for idx, opt in enumerate(q.options, 1):
+            marker = " (recommended)" if q.recommendation == opt.key else ""
+            option_lines.append(f"{idx}. [{opt.key}] {opt.label}{marker}")
+            if opt.impact:
+                option_lines.append(f"   impact: {opt.impact}")
+        option_lines.append("")
+    if gate is not None and gate.status.value == "OPEN":
+        for q in gate.unresolved_questions():
+            option_lines.append(f"### {q.decision_key}: {q.question}")
+            for idx, opt in enumerate(q.options, 1):
+                marker = " (recommended)" if q.recommendation == opt.key else ""
+                option_lines.append(f"{idx}. [{opt.key}] {opt.label}{marker}")
+                if opt.impact:
+                    option_lines.append(f"   impact: {opt.impact}")
+            option_lines.append("")
+    if not option_lines:
+        option_lines = ["- none — no trustworthy decision packet was derivable"]
+    parts.append(_section("Suggested Options", option_lines))
+
+    parts.append(
+        _section(
+            "Relevant Artifacts",
+            [
+                "- task.md",
+                "- proposal.md",
+                "- issues.json",
+                "- decisions.json",
+                "- human-gate.md",
+                "- events.jsonl",
+            ],
+        )
+    )
+
+    next_action: list[str] = [
+        "This session is terminal and cannot be resumed in place. To continue "
+        "the work, start a new session and state the Human conclusions "
+        "directly in the request (they become session facts), or supersede "
+        "the relevant decisions there."
+    ]
+    if gate is not None and gate.status.value == "OPEN":
+        next_action.insert(
+            0,
+            "An open Human Gate exists: answer it via 'review resume' only if "
+            "the session has not terminated.",
+        )
+    parts.append(_section("Recommended next action", next_action))
     return "\n".join(parts)
 
 
@@ -255,8 +398,16 @@ def render_final(
 
     decision_lines = []
     for d in active_decisions:
-        option = d.selected_option_key or "-"
-        decision_lines.append(f"- [{d.decision_key}] {d.question} -> **{option}** ({d.answer_text})")
+        if d.source.value == "CUSTOM":
+            # Human-defined decision — labeled as such, never presented
+            # as an Agent-selected option (V0.2 spec 12).
+            decision_lines.append(
+                f"- [{d.decision_key}] {d.question} -> **(human-defined)** {d.answer_text}"
+            )
+        else:
+            decision_lines.append(
+                f"- [{d.decision_key}] {d.question} -> **{d.selected_option_key or '-'}** ({d.answer_text})"
+            )
     parts.append(_section("Confirmed Human Decisions", decision_lines or ["- (none)"]))
 
     resolved_lines = [

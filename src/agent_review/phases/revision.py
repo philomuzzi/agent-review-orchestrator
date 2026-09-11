@@ -17,7 +17,12 @@ def run(o) -> ExitCode | None:
 
     human_ids = _need_human_ids(o)
     if human_ids:
-        return try_gate_for_need_human_issues(o, human_ids)
+        # Authority-check routing from within the correction phase: a
+        # covered issue reverts to OPEN and this phase's body proceeds;
+        # a new Human decision opens a Convergence Gate.
+        return try_gate_for_need_human_issues(
+            o, human_ids, continue_routing=False
+        )
     if o.state.budgets.revision_used >= o.state.limits.max_revision_rounds:
         o.fail("REVISION reached with revision budget exhausted")
         return int(ExitCode.FAILED)

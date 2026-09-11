@@ -31,7 +31,7 @@ app = typer.Typer(
     "a Pi Author + Codex Reviewer + Human Gate workflow.",
 )
 
-SHOW_KINDS = ("final", "gate", "task", "proposal", "issues", "events")
+SHOW_KINDS = ("final", "gate", "task", "proposal", "issues", "events", "handoff")
 
 
 def _package_version() -> str:
@@ -308,7 +308,7 @@ def show(
     session_id: str = typer.Argument(None, help="Session id (default: latest unfinished)."),
     repo: str = typer.Option(None, "--repo", help="Target repository."),
 ) -> None:
-    """Show a session artifact (final.md, gate, task, proposal, issues)."""
+    """Show a session artifact (final, gate, task, proposal, issues, events, handoff)."""
     if what not in SHOW_KINDS:
         _echo_exit(ExitCode.FAILED, f"Unknown artifact '{what}'. Use one of: {', '.join(SHOW_KINDS)}")
     repo_path = _repo_path(repo)
@@ -330,6 +330,7 @@ def show(
         "proposal": "proposal.md",
         "issues": "issues.json",
         "events": "events.jsonl",
+        "handoff": "handoff.md",
     }
     content = store.read_text(files[what])
     if content is None:
