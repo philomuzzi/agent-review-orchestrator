@@ -1,274 +1,247 @@
 # Agent Review Orchestrator V0.1 Implementation Audit
 
-**Status:** V0.1-RC1 — blocking fixes required before the next real Shopify validation
-**Audit type:** Static implementation review
-**Implementation commit:** `24eb2b52fd2d18088edb0bbd258f331376ba45f1`
-**Reviewed against:** `docs/V0_1_RUNTIME_PROGRESS_VISIBILITY_SPEC.md`
+**Status:** V0.1-RC2 implementation; real-agent validated
+**Audit Type:** Static + dynamic implementation review against `V0_1_RUNTIME_PROGRESS_VISIBILITY_SPEC.md` and the V0 safety boundary (PASS rule, Human Authority, Issue lifecycle, budgets, recovery, read-only agents)
 
-## 1. Summary
+**RC1 baseline:** commit `24eb2b5` ("feat: implement V0.1 runtime progress visibility + session presentation").
 
-V0.1 is directionally correct and preserves the V0 architecture well:
+## RC2 remediation record — 2026-09-11
 
-- runtime progress is projected from Orchestrator-owned events;
-- `events.jsonl` and CLI rendering share one event path;
-- long agent calls emit heartbeats without fake percentage progress;
-- raw agent reasoning is not streamed;
-- session identity is separated from the human-facing task title;
-- short request-independent session IDs are used;
-- `--verbose`, `--quiet`, `--name`, and `status --list` are implemented;
-- the implementation report records deterministic tests, real Pi/Codex smoke, and a real-agent E2E run.
+The RC1 findings below are retained as the audit baseline. B001–B003 are
+addressed in code with deterministic regression coverage in
+`tests/unit/test_v01_rc2_regressions.py`. No V0 workflow semantics, safety
+boundaries, event-source architecture or rendering levels were redesigned;
+all fixes are host-side sanitization, fail-closed lookup hardening and
+local convenience additions.
 
-The implementation should be treated as **V0.1-RC1**, not final, because several runtime-presentation paths can still present the wrong session or misleading workflow truth.
+| Finding / family | Confirmed root cause (verified by probe) | RC2 correction | Remaining boundary |
+| --- | --- | --- | --- |
+| B001 / presentation trust | `DiscoveryResult.task_title` (agent free text) and `--name` were persisted unsanitized; a probe session persisted a 317-char title containing `\n`/`\t`, splitting `status --list` rows and the banner/header blocks. | Host-owned `sanitize_title()` (single printable line, whitespace collapsed, control chars removed, ≤80 chars) applied at both ingestion points (`discover` phase, `StateStore.create_session`); `display_title()` re-sanitizes on render so legacy/edited states stay safe. | The title is still agent-derived text; the host bounds its form, not its truth. Title edits remain presentation-only (regression-tested). |
+| B002 / renderer line-safety | Event payloads with newlines (e.g. `SESSION_FAILED` reasons embedding codex stderr tails) rendered one event as 3 terminal lines, breaking the one-line-per-fact contract in every level including `--quiet`. | `_one_line()` (whitespace collapse + control-char strip, list-aware) applied to every free-text render field (reasons, errors, titles) and to the verbose fallback dump. | Payload text is bounded to one line, not semantically rewritten. |
+| B003 / lookup resilience | `StateStore.load_state()` raised on corrupt `state.json`; `load_state_of()` caught only `FileNotFoundError` — one corrupt session crashed `review status`, `status --list` (the "(corrupt state)" row was dead code), `show` and `resume` with tracebacks. | `load_state()`/`load_state_of()` return `None` for missing/unreadable/invalid state (fail closed); CLI `resume` catches `AgentError`/`ValueError` from construction into a clean exit 30; `step()` keeps the last known-good in-memory state when a post-recovery reload fails; `load_proposal()` treats unknown revision state as "no active design". `recover_phase()` still hard-fails on an invalid checkpoint (V0-RC2 semantics unchanged). | A corrupt session is reported, not repaired; recovery truth remains the phase checkpoint. |
+| N002 / id format | Same-second id collision appended `-2` (`20260911-010101-aaaa-2`), breaking the compact-format invariant. | Collision retry regenerates a fresh `YYYYMMDD-HHMMSS-xxxx` id (bounded loop). | Random suffix; collision probability unchanged (~2^-16 per pair). |
+| N001 / convenience | `review --version` exited 2 with a usage error; no way to inspect the event stream per session. | `review --version` prints package name+version (exit 0); `review show events` prints `events.jsonl`. Both recorded as V0 lessons §7.3 candidates. | — |
+| N003 / CLI parity | `review resume` ignored a config file argument (`run` had `--config`, resume did not). | `resume --config PATH` accepted, same resolution order. | Config is still not persisted per session (V0 audit N003 stays deferred). |
 
----
+Regression coverage added (19 tests): title sanitization unit matrix; evil
+DISCOVER title sanitized before persist (state + `TASK_TITLE_SET` event);
+sanitized `--name`; hostile legacy state re-sanitized on display;
+`status --list`/`status` rows stay single-line under a newline title;
+renderer collapse at default/quiet/verbose for FAILED/HANDOFF/agent-failure
+/title/verbose-fallback payloads; corrupt-session degradation for
+`status --list` / `status` / `show` / `resume` (clean exit 30, no
+traceback); `load_state` lenient vs `recover_phase` strict; collision-safe
+compact id; `--version`; `show events`; `resume --config`; title rename
+never changes session identity or phase.
 
-## 2. Blocking Findings
+Final deterministic verification: `python -m pytest --basetemp=.test-tmp/rc2-final
+-p no:cacheprovider` passed **171 tests** (152 RC1 + 19 RC2 regressions),
+**2 opt-in real smoke tests skipped** (17.5s). `review --version`,
+`review --help`, and `git diff --check` passed.
 
-### B101 — Default session resolution can select the wrong session
+Real smoke (`AGENT_REVIEW_SMOKE=1`): **2 passed** in 148.5s against
+pi 0.85.1 and codex-cli 0.154.0 (capability probes, RPC framing, exec
+schema validation, read-only probes).
 
-#### Problem
+Real-agent E2E (pi 0.85.1 + codex 0.154.0, real adapters, real renderer,
+only the human gate keystrokes scripted):
 
-V0.1 changed session IDs to:
+1. `20260911-014137-2ed9` (named「同步任务步骤重试上限」): capability
+   checks visible with heartbeats (pi 8s, codex 64s incl. 15/30/45s
+   beats) → DISCOVER heartbeats → 5 candidates, REQUIREMENT_TOO_AMBIGUOUS
+   asked 3, gate answered → task revision 2 rendered (↻ STALE archive
+   notice) → deferred candidates re-surfaced as gate 2 (budget 2/2),
+   answered → task revision 3 → DESIGN with 15s cadence heartbeats →
+   INITIAL_REVIEW 2 blocking → R001 (FACT blocker) classified NEED_HUMAN
+   → HUMAN_HANDOFF exit 10. Correct V0 boundary behavior: reviewer
+   semantics the agent may not answer; handoff preserved the scene and
+   `status` reports it scan-friendly.
+2. `20260911-014955-a907` (no `--name`): banner showed the
+   `Current request` placeholder before DISCOVER, then persisted the
+   semantic title 「README 补充 run_steps 参数行为说明」(13 chars, semantic,
+   not request truncation) → one SCOPE gate (docs language) answered →
+   revision 2 → DESIGN → INITIAL_REVIEW 0 blocking → FINALIZE →
+   **DONE exit 0**; `status --list` shows both sessions (id, title,
+   outcome) and the new `show events` streams the real event log.
 
-```text
-YYYYMMDD-HHMMSS-<random-4-hex>
+Both Windows console guards (rich legacy Win32, UTF-8 stdio) held across
+all rendered output paths; no Errno 22, no native crash, no mojibake in
+console or redirected files.
+
+V0.1-RC2 is ready for the next validation gate: a real Shopify repository
+session. Known limitations are listed under "Remaining limitations" below;
+none blocks that gate.
+
+N004–N008 remain deferred as recorded below. No V0.1 non-goal was added.
+
+## Conclusion
+
+The V0.1 implementation has the correct architecture, confirmed unchanged
+in RC2:
+
+- single event source (`Orchestrator.event()` → `events.jsonl` + renderer,
+  adapter protocol retries via `event_sink`);
+- orchestrator-owned heartbeats (stop-event daemon thread per agent call,
+  capability probes included);
+- renderer as a pure projection with deterministic level filtering;
+- session identity (`YYYYMMDD-HHMMSS-xxxx`) fully separated from the
+  presentation title (`--name` > DISCOVER > placeholder).
+
+The RC1 gaps were all in the trust boundary between agent-supplied text
+and persisted/rendered presentation metadata, plus fail-closed lookup
+behavior around corrupt sessions — exactly the class of defect the V0
+audit pattern predicts for any new data path into the CLI surface.
+
+## Blocking Issues (RC1 baseline)
+
+## B001 — Agent-supplied task_title persisted without host sanitization
+
+**Problem**
+
+`discover` persists `result.task_title` verbatim into `state.json`, and
+`--name` is only `.strip()`ed. Verified by probe: a scripted DISCOVER
+reply produced a 317-character title containing `\n` and `\t`, which then
+split `status --list` rows and `status`/banner header blocks into
+multiple lines.
+
+Why blocking: the title is rendered by every session-oriented command
+(spec 4.4) and `status --list` is the scan surface (spec AC12). Agent
+free text must never control terminal formatting (spec 3.3: default
+output displays workflow facts; presentation is a projection).
+
+**Expected behavior**
+
+- The host deterministically bounds the title before persistence: single
+  printable line, whitespace collapsed, control characters removed,
+  length capped.
+- Empty-after-sanitize falls back to the placeholder, never to request
+  truncation.
+
+## B002 — Renderer emits multi-line output for single events
+
+**Problem**
+
+`_on_session_failed` / `_on_session_human_handoff` /
+`_on_agent_call_failed` / `_on_task_title_set` interpolate payload strings
+directly. Failure reasons embed agent stderr tails (e.g. codex exec
+error output), which contain newlines. Verified by probe: one
+`SESSION_FAILED` event rendered as 3 terminal lines at default level;
+`--quiet` is equally affected.
+
+Why blocking: violates the spec §6/§8 information model (one concise line
+per workflow fact) and the deterministic-output guarantee (AC6) that CI
+consumers rely on.
+
+**Expected behavior**
+
+- Every rendered event occupies exactly one line regardless of payload
+  content; whitespace collapses to single spaces, control characters are
+  dropped.
+
+## B003 — A corrupt session crashes all session lookup paths
+
+**Problem**
+
+`StateStore.load_state()` raises on unparseable `state.json`;
+`load_state_of()` caught only `FileNotFoundError`. Verified by probe:
+with one corrupt session present, `review status` and `review
+status --list` exit 1 with an unhandled exception; the "(corrupt state)"
+list row was unreachable dead code; `show` and `resume` traceback the
+same way.
+
+Why blocking: V0's fail-closed discipline requires clean, explicit
+failure messages, and V0.1's own acceptance criterion (AC12, scan-friendly
+recent sessions) requires one bad session not to hide the others.
+
+**Expected behavior**
+
+- Missing/unreadable/invalid state is surfaced as `None` to lookup paths;
+  CLI commands degrade to explicit FAILED messages (exit 30);
+  `status --list` keeps listing valid sessions and marks corrupt ones;
+  checkpoint recovery keeps hard-failing on invalid checkpoints.
+
+# Non-blocking Improvements
+
+## N001 — Convenience commands (addressed in RC2)
+
+`review --version` (exit-2 usage error in RC1) and a per-session event
+viewer. Both were recorded as candidates in V0 lessons §7.3. Added:
+`review --version`, `review show events`.
+
+## N002 — Session-id collision fallback broke the compact format (addressed in RC2)
+
+The RC1 fallback appended `-2`, producing ids that violate the
+`YYYYMMDD-HHMMSS-xxxx` invariant the tests and presentation rely on.
+RC2 regenerates a fresh random suffix instead.
+
+## N003 — `resume` config parity (addressed in RC2)
+
+`review resume` now accepts `--config PATH` like `review run`. Persisting
+the creation config inside the session remains deferred (V0 audit N003).
+
+## N004 — Event-name mapping vs spec §5 (documented, no change)
+
+The spec's event list is illustrative; the implementation emits a stable
+superset with different names: `HUMAN_GATE_CREATED` (vs
+`HUMAN_GATE_OPENED`), `SESSION_DONE` (vs `SESSION_COMPLETED`),
+`SESSION_HUMAN_HANDOFF` (vs `SESSION_HANDOFF`), and per-phase
+`*_COMPLETED` events (vs a generic `PHASE_COMPLETED`). Renaming now would
+churn the event-stream contract for zero behavioral gain; V0.3 telemetry
+consumes the implemented names. Recorded here as the authoritative
+mapping.
+
+## N005 — Heartbeat volume in events.jsonl (deferred to V0.3)
+
+Heartbeats are deliberately persisted (single event source, spec 3.5).
+~230 events per real session is acceptable for V0.1; sampling/throttling
+policy is a telemetry aggregation decision → V0.3.
+
+## N006 — Telemetry aggregation (deferred to V0.3)
+
+Phase/agent duration distributions, retry concentration by schema/phase,
+heartbeat-density vs stuck-call discrimination, resume success rates.
+The event stream already carries the required fields; building the
+aggregator is V0.3 scope.
+
+## N007 — NEED_HUMAN decision-option packets (deferred)
+
+Reviewer NEED_HUMAN issues carry no option packet, so V0 hands off
+instead of opening a resumable gate (observed again in the RC2 real E2E,
+session `20260911-014137-2ed9`, R001). Letting reviewers attach decision
+options changes the issue protocol and reviewer responsibilities → defer
+to the V0.5 role-assignment work stream, per V0 lessons §5.3.
+
+## N008 — PowerShell 5.1 OEM(936) pipe decoding (documented platform boundary)
+
+PS `| Select-Object` decodes UTF-8 bytes as GBK; emitter-side cannot
+satisfy msys (UTF-8) and PS pipes simultaneously. Unchanged; see V0
+lessons §7.3.2.
+
+# Remaining limitations (RC2)
+
+1. Heartbeat-vs-terminal-event ordering: a final heartbeat may land after
+   the terminal event (thread timing); cosmetic, semantics unaffected.
+2. One workflow owner per session; no concurrent-writer or power-loss
+   guarantee beyond atomic single-file writes + phase checkpoints (V0
+   boundary).
+3. Sessions with status FAILED remain resumable by design; lookup prefers
+   RUNNING sessions for the default target.
+4. Corrupt sessions are reported, never repaired; recovery truth is the
+   phase checkpoint.
+5. NEED_HUMAN handoffs still require a human to read `issues.json`
+   (N007).
+
+# Next Validation Gate
+
+Run one real Shopify repository session through the installed CLI:
+
+```bash
+cd <shopify-repo>
+review --name "<short title>" "<well-scoped change request>"
 ```
 
-`status --list` correctly sorts sessions by `state.created_at`, but the shared default resolver used by `review resume`, `review status`, and `review show` still delegates to `StateStore.latest_session()`, which derives recency from lexicographically sorted directory names.
-
-Within the same second, the random suffix has no temporal meaning. Therefore the default commands can select the wrong session.
-
-There is also a status-policy mismatch: `resume` is documented as selecting the latest unfinished session, but `latest_session(unfinished_only=True)` currently treats only `RUNNING` as unfinished. `FAILED` and `INTERRUPTED` sessions are resumable and may be newer than an older `RUNNING` session.
-
-#### Impact
-
-- `review resume` may resume the wrong task;
-- `review status` / `review show` may inspect the wrong task;
-- the new short random session-ID scheme makes the old directory-name ordering invalid.
-
-#### Required correction
-
-Create one shared session-resolution policy based on persisted session metadata, not directory-name ordering.
-
-At minimum:
-
-- sort by `state.created_at` or another authoritative persisted timestamp;
-- define resumable / unfinished states explicitly;
-- make `resume`, `status`, `show`, and `status --list` use compatible ordering semantics;
-- keep explicit session IDs authoritative when provided.
-
-#### Acceptance criteria
-
-1. Two sessions created in the same second with opposite lexical random suffix ordering still resolve newest-first by persisted timestamp.
-2. A newer `FAILED` or `INTERRUPTED` resumable session is not hidden by an older `RUNNING` session unless an explicit policy says otherwise.
-3. `status --list` and default resolution share one well-defined ordering policy.
-4. Regression tests cover same-second random suffixes and mixed session statuses.
-
----
-
-### B102 — Review progress can display a stronger conclusion than the Orchestrator has established
-
-#### Problem
-
-V0.1 intends progress output to be trustworthy workflow truth, but some review completion lines are rendered from partial Reviewer outputs rather than the Orchestrator's post-processing result.
-
-#### Closure Review case
-
-`CLOSURE_REVIEW_COMPLETED` currently reports how many addressed blockers were verified resolved, but does not include blockers newly introduced during the same closure review.
-
-This can produce output similar to:
-
-```text
-✓ CLOSURE_REVIEW · 2 of 2 blocker(s) verified resolved
-```
-
-while the same review has just introduced a new blocking regression.
-
-#### Final Review case
-
-`FINAL_REVIEW_COMPLETED` renders `satisfies_requirement` directly from the Reviewer result and may show:
-
-```text
-✓ FINAL_REVIEW · requirement satisfied
-```
-
-before the Orchestrator computes mechanical PASS. The workflow can then immediately fail PASS because blocking issues still exist and enter `HUMAN_HANDOFF`.
-
-That violates the architecture principle:
-
-> Agents provide judgments; the Orchestrator owns workflow truth.
-
-#### Impact
-
-The user may see a successful-looking statement immediately before the workflow reports failure or handoff. This undermines the exact trust problem V0.1 was introduced to solve.
-
-#### Required correction
-
-Progress summaries for review phases must reflect **post-ingestion, post-lifecycle, post-mechanical-PASS state**.
-
-Possible direction:
-
-```text
-✓ CLOSURE_REVIEW · 2 existing blockers resolved · 1 new blocker · 1 blocker remains
-
-✓ FINAL_REVIEW completed
-! requirement check not passed · 1 blocking issue remains
-```
-
-The exact wording is not normative; the truth source is.
-
-#### Acceptance criteria
-
-1. Closure Review output includes any newly introduced blocker that affects current PASS state.
-2. Final Review output never equates Reviewer `satisfies_requirement=true` with workflow PASS.
-3. A user cannot see `requirement satisfied` when the Orchestrator will immediately fail PASS for unresolved blockers, active gate, or stale proposal state.
-4. Tests cover a closure regression blocker and a final-review verdict/PASS disagreement.
-
----
-
-### B103 — Agent-generated `task_title` crosses the presentation boundary without host sanitization
-
-#### Problem
-
-`task_title` is agent-generated text. The prompt asks Pi to produce a concise semantic title, but the persisted model currently accepts an arbitrary string and the host writes/displays it directly.
-
-This relies on prompt compliance for presentation safety and readability.
-
-Potential malformed outputs include:
-
-- multiline text;
-- excessive length;
-- control characters;
-- terminal escape/control sequences;
-- accidental prose instead of a title.
-
-The semantic quality can remain agent-owned, but structural presentation safety must be host-owned.
-
-#### Required correction
-
-Introduce a deterministic host-side title normalization boundary before persistence/display.
-
-Suggested constraints:
-
-- trim surrounding whitespace;
-- normalize to a single line;
-- remove control characters / terminal escape sequences;
-- apply a reasonable hard maximum length;
-- retain Unicode/CJK text;
-- preserve explicit `--name` precedence, while applying equivalent display-safety normalization.
-
-Do not enforce a brittle semantic rule such as exactly 10–20 Chinese characters; that remains prompt guidance, not a hard protocol constraint.
-
-#### Acceptance criteria
-
-1. Multiline agent titles render as one safe line.
-2. Control/escape characters cannot affect terminal presentation.
-3. Very long titles are bounded deterministically.
-4. Normal Chinese/English semantic titles remain unchanged or minimally normalized.
-5. Tests cover agent-generated titles and explicit `--name` values.
-
----
-
-## 3. Non-blocking Improvements
-
-### N101 — Ctrl+C is currently also emitted as `AGENT_CALL_FAILED`
-
-`agent_call()` catches `BaseException`, so a `KeyboardInterrupt` first emits an agent-call failure and is later converted into `SESSION_INTERRUPTED` by the outer run loop.
-
-For future telemetry this can incorrectly count a user cancellation as an agent failure.
-
-Recommended: represent cancellation/interruption separately, or avoid emitting `AGENT_CALL_FAILED` for `KeyboardInterrupt` / cancellation paths.
-
----
-
-### N102 — Heartbeat event production is coupled to the renderer
-
-The Orchestrator reads `self.renderer.heartbeat_interval` to decide whether heartbeat events exist at all. With `NullRenderer`, no heartbeat events are produced.
-
-This weakens the claim that the event stream is independent of presentation and may matter for V0.3 telemetry.
-
-Recommended: heartbeat production policy should come from configuration / Orchestrator; Renderer should only decide whether to display an event.
-
----
-
-### N103 — Phase naming is inconsistent across event families
-
-Agent-call events use workflow phase names such as:
-
-```text
-INITIAL_REVIEW
-```
-
-Protocol retry events may carry adapter method names such as:
-
-```text
-initial_review
-```
-
-V0.3 aggregation will otherwise split one logical phase into multiple values.
-
-Recommended: normalize event phase values to the canonical `Phase` enum vocabulary.
-
----
-
-### N104 — V0.3 cannot safely aggregate raw `events.jsonl` without attempt/commit semantics
-
-Crash recovery intentionally allows audit events from an uncommitted phase attempt to remain after rollback. A later resume may execute the same phase again.
-
-Therefore raw event counts/durations can double-count rolled-back attempts.
-
-Before V0.3 relies on the event stream for metrics, add enough semantics to distinguish committed vs rolled-back attempts, for example:
-
-- `phase_attempt_id`;
-- `PHASE_COMMITTED` / `PHASE_ROLLED_BACK`;
-- or an equivalent deterministic mechanism.
-
-No V0.1 behavior change is required if this is explicitly deferred to V0.3.
-
----
-
-### N105 — `TASK_REVISION_INCREMENTED` message can claim an archive that did not happen
-
-The default progress text says the old proposal was archived STALE whenever task revision increments, but Human Gate may occur before any proposal exists.
-
-Recommended: emit/render only facts that actually occurred, e.g. separate `PROPOSAL_STALE` from generic task-revision change messaging.
-
----
-
-## 4. Required RC2 Scope
-
-V0.1-RC2 should be deliberately small.
-
-Required:
-
-- fix B101 session resolution;
-- fix B102 review progress truth;
-- fix B103 title presentation boundary;
-- add regression tests for all three;
-- preserve V0 PASS, Human Gate, Issue lifecycle, budgets, crash recovery, and read-only safety;
-- run the full deterministic suite;
-- rerun real Pi/Codex smoke where available;
-- perform one real E2E that exercises progress output and session presentation.
-
-Recommended while touching the same code:
-
-- N101 interruption classification;
-- N103 canonical phase naming;
-- N105 truthful task-revision messaging.
-
-N102 and N104 may be explicitly documented for V0.3 if changing them would widen V0.1-RC2 unnecessarily.
-
----
-
-## 5. Exit Criteria
-
-V0.1 may move from RC1 to complete only when:
-
-1. default session commands resolve the intended latest session deterministically;
-2. visible progress never overstates workflow success relative to mechanical PASS;
-3. all agent/user-generated presentation titles cross a deterministic safety boundary;
-4. deterministic regressions pass;
-5. real-agent smoke remains healthy;
-6. a real repository run confirms that the CLI is both perceptible during execution and understandable when inspecting/resuming sessions.
-
-The final product validation should be performed on a real Shopify workflow rather than only a synthetic E2E.
+Validate that: progress remains continuously readable in a long real
+run (heartbeats ≤15s cadence), gates/packets are answerable via
+`review resume`, `status --list` and `show events` make the session
+recognizable later without reading the original request, and any
+handoff/protocol failure resumes cleanly.

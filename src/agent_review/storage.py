@@ -88,12 +88,15 @@ class StateStore:
         """Create a fresh session directory with input.md and state.json."""
         repo = Path(repository).resolve()
         root = review_root(repo)
-        base = new_session_id()
-        session_id = base
-        n = 1
-        while (root / session_id).exists():
-            n += 1
-            session_id = f"{base}-{n}"
+        session_id = new_session_id()
+        for _ in range(1000):  # 4 random hex digits: collisions are ~2^-16
+            if not (root / session_id).exists():
+                break
+            # Regenerate the whole id (never append a suffix): the compact
+            # ``YYYYMMDD-HHMMSS-xxxx`` format is a stable presentation contract.
+            session_id = new_session_id()
+        else:  # pragma: no cover - unreachable without a broken RNG
+            raise OSError("could not allocate a unique session id")
 
         store = StateStore(repo, session_id)
         store.dir.mkdir(parents=True, exist_ok=True)
@@ -108,12 +111,17 @@ class StateStore:
         )
 
         kind = TaskKind(task_kind_explicit.upper()) if task_kind_explicit else TaskKind.CHANGE
+        # Presentation metadata: the user-supplied name goes through the same
+        # host-owned sanitization as the discovered semantic title.
+        from agent_review.progress import sanitize_title  # noqa: PLC0415
+
+        title = sanitize_title(name)
         state = SessionState(
             session_id=session_id,
             repository=str(repo),
             request=request,
-            task_title=(name.strip() or None) if name else None,
-            task_title_source="user" if name and name.strip() else None,
+            task_title=title or None,
+            task_title_source="user" if title else None,
             task_kind=kind,
             kind_explicit=task_kind_explicit is not None,
             phase=Phase.INIT,
@@ -171,10 +179,24 @@ class StateStore:
         _write_json(self.dir / "state.json", json.loads(state.model_dump_json()))
 
     def load_state(self) -> SessionState | None:
-        data = _read_json(self.dir / "state.json")
+        """Load state.json; ``None`` when missing, unreadable or invalid.
+
+        Session lookup paths (status/show/list/resume) must degrade to a
+        clean "corrupt session" message instead of a traceback, so an
+        unparseable state is surfaced as ``None`` (fail closed) rather
+        than raised. Recovery-critical validation stays in
+        ``recover_phase``, which hard-fails on an invalid checkpoint.
+        """
+        try:
+            data = _read_json(self.dir / "state.json")
+        except (OSError, ValueError):
+            return None
         if data is None:
             return None
-        return SessionState.model_validate(data)
+        try:
+            return SessionState.model_validate(data)
+        except ValueError:
+            return None
 
     # -- phase artifacts ----------------------------------------------------
 
@@ -216,7 +238,10 @@ class StateStore:
         data = _read_json(self.dir / "proposal.json")
         proposal = DesignResult.model_validate(data) if data else None
         state = self.load_state()
-        if proposal and state and proposal.based_on_task_revision != state.task_revision:
+        if proposal is not None and (
+            state is None
+            or proposal.based_on_task_revision != state.task_revision
+        ):
             return None  # retained for recovery, but not an active design
         return proposal
 
@@ -297,7 +322,7 @@ class StateStore:
         store = StateStore(repository, session_id)
         try:
             return store.load_state()
-        except FileNotFoundError:
+        except (OSError, ValueError):
             return None
 
     @staticmethod

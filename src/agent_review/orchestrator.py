@@ -317,7 +317,12 @@ class Orchestrator:
             return code
         except BaseException:
             self.store.recover_phase()
-            self.state = self.store.load_state()
+            # Keep the last known-good in-memory state when the reload itself
+            # fails (corrupt/missing state.json): recovery already restored
+            # the durable copy, and the original exception is re-raised below.
+            reloaded = self.store.load_state()
+            if reloaded is not None:
+                self.state = reloaded
             raise
 
     def _step(self) -> Optional[int]:

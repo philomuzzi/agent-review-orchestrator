@@ -25,7 +25,8 @@ review --name "同步任务暂停" "request"        # explicit presentation titl
 review resume [session-id]                   # resume interrupted / gate sessions
 review status [session-id]                   # phase, blockers, budgets
 review status --list                         # recent sessions (id, title, outcome)
-review show [final|gate|task|proposal|issues] [session-id]
+review show [final|gate|task|proposal|issues|events] [session-id]
+review --version                             # package version
 ```
 
 Output levels (V0.1): default shows phase transitions, agent activity,

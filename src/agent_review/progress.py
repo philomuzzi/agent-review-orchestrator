@@ -16,6 +16,7 @@ Output levels (spec 8):
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 from datetime import datetime, timezone
@@ -24,6 +25,12 @@ from typing import IO, Any
 
 # Neutral placeholder shown before a semantic task title exists (spec 4.2).
 PLACEHOLDER_TITLE = "Current request"
+
+# Presentation titles are bounded, single-line text regardless of what the
+# agent or the user supplied (spec 3.3/4.2: the title is a projection, never
+# free-form agent output). 80 chars comfortably exceeds the recommended
+# 10-20 CJK characters while keeping tables and banners scannable.
+MAX_TITLE_LENGTH = 80
 
 SYMBOL_START = "→"
 SYMBOL_DONE = "✓"
@@ -62,9 +69,39 @@ class OutputLevel(str, Enum):
     QUIET = "quiet"
 
 
+def _one_line(text: Any) -> str:
+    """Coerce any value to safe single-line printable text.
+
+    Event payloads occasionally carry externally derived text (agent
+    stderr tails in failure reasons, task titles). Rendering must keep
+    the one-line-per-fact contract: drop control characters and collapse
+    all whitespace runs (newlines/tabs included) to single spaces.
+    """
+    if isinstance(text, (list, tuple, set)):
+        return " ".join(_one_line(item) for item in text)
+    if not isinstance(text, str):
+        text = str(text)
+    # Collapse whitespace (newlines/tabs) to spaces first, then drop any
+    # remaining control characters, keeping words separated.
+    text = re.sub(r"\s+", " ", text)
+    text = "".join(ch for ch in text if ch.isprintable())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def sanitize_title(raw: str | None) -> str:
+    """Host-owned deterministic title normalization (spec 4.2).
+
+    Applied before persistence: the semantic title and the user-supplied
+    ``--name`` are presentation metadata, so the host bounds them to a
+    single printable line of at most ``MAX_TITLE_LENGTH`` characters.
+    Returns "" when nothing presentable remains (placeholder is used).
+    """
+    return _one_line(raw or "")[:MAX_TITLE_LENGTH]
+
+
 def display_title(state) -> str:
     """Human-facing session label: explicit name > semantic title > placeholder."""
-    return (state.task_title or "").strip() or PLACEHOLDER_TITLE
+    return sanitize_title(getattr(state, "task_title", None)) or PLACEHOLDER_TITLE
 
 
 def format_elapsed(seconds: float) -> str:
@@ -209,12 +246,12 @@ class ProgressRenderer:
 
     def _on_session_human_handoff(self, event: dict) -> None:
         self._phase_header_shown = False
-        reason = str(event.get("reason", "task-level boundary reached"))
+        reason = _one_line(event.get("reason", "task-level boundary reached"))
         self._write(f"{self._stamp(event)} {SYMBOL_GATE} HUMAN_HANDOFF · {reason}")
 
     def _on_session_failed(self, event: dict) -> None:
         self._phase_header_shown = False
-        reason = str(event.get("reason", "unexpected failure"))
+        reason = _one_line(event.get("reason", "unexpected failure"))
         self._write(f"{self._stamp(event)} {SYMBOL_FAIL} FAILED · {reason}")
 
     def _on_session_interrupted(self, event: dict) -> None:
@@ -348,7 +385,7 @@ class ProgressRenderer:
 
     def _on_agent_call_failed(self, event: dict) -> None:
         agent = AGENT_NAMES.get(str(event.get("agent", "")), "Agent")
-        error = str(event.get("error", ""))
+        error = _one_line(event.get("error", ""))
         self._write(f"{self._stamp(event)} {SYMBOL_FAIL} {agent} call failed: {error}")
 
     # -- issues / retry / gates ---------------------------------------------------------
@@ -433,7 +470,7 @@ class ProgressRenderer:
         )
 
     def _on_task_title_set(self, event: dict) -> None:
-        title = event.get("title", "")
+        title = _one_line(event.get("title", ""))
         if title and title != PLACEHOLDER_TITLE:
             self._write(f"         task title: {title}")
 
@@ -466,7 +503,7 @@ class ProgressRenderer:
             for k, v in event.items()
             if k not in ("event", "ts")
         }
-        suffix = " ".join(f"{k}={v}" for k, v in sorted(details.items()))
+        suffix = " ".join(f"{k}={_one_line(v)}" for k, v in sorted(details.items()))
         self._write(f"         · {name} {suffix}".rstrip())
 
 

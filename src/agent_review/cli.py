@@ -7,9 +7,10 @@ The binary maps the invocation style required by the V0 contract:
 - ``review --kind change "<request>"``
 - ``review --name "title" "<request>"``     (V0.1 presentation title)
 - ``review --verbose`` / ``review --quiet`` (V0.1 output levels)
-- ``review resume [session-id]``
+- ``review --version``                      (V0.1-RC2)
+- ``review resume [session-id] [--config PATH]``
 - ``review status [session-id] [--list]``
-- ``review show [final|gate|task|proposal|issues] [session-id]``
+- ``review show [final|gate|task|proposal|issues|events] [session-id]``
 """
 
 from __future__ import annotations
@@ -30,7 +31,16 @@ app = typer.Typer(
     "a Pi Author + Codex Reviewer + Human Gate workflow.",
 )
 
-SHOW_KINDS = ("final", "gate", "task", "proposal", "issues")
+SHOW_KINDS = ("final", "gate", "task", "proposal", "issues", "events")
+
+
+def _package_version() -> str:
+    try:
+        from importlib.metadata import version  # noqa: PLC0415
+
+        return version("agent-review-orchestrator")
+    except Exception:  # pragma: no cover - only when not installed
+        return "unknown"
 
 
 def _repo_path(repo: str | None) -> Path:
@@ -146,6 +156,9 @@ def run(
 def resume(
     session_id: str = typer.Argument(None, help="Session id (default: latest unfinished)."),
     repo: str = typer.Option(None, "--repo", help="Target repository."),
+    config_path: str = typer.Option(
+        None, "--config", help="Path to config TOML (default: auto-detect)."
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", help="Show artifacts, issue IDs, budgets and retry detail."
     ),
@@ -158,14 +171,20 @@ def resume(
     sid = _resolve_session(repo_path, session_id)
     if sid is None:
         _echo_exit(ExitCode.FAILED, "No sessions found under .review/")
-    config: Config = load_config(None)
+    config: Config = load_config(config_path)
 
+    from agent_review.agents.base import AgentError
     from agent_review.orchestrator import Orchestrator
 
     renderer = _build_renderer(config, verbose, quiet)
-    orchestrator = Orchestrator.resume(
-        repository=repo_path, session_id=sid, config=config, renderer=renderer
-    )
+    try:
+        orchestrator = Orchestrator.resume(
+            repository=repo_path, session_id=sid, config=config, renderer=renderer
+        )
+    except (AgentError, ValueError) as exc:
+        # Corrupt/missing session state or an invalid recovery checkpoint:
+        # fail closed with a clean message instead of a traceback.
+        _echo_exit(ExitCode.FAILED, f"Cannot resume session {sid}: {exc}")
     _report(orchestrator, repo_path)
 
 
@@ -243,7 +262,7 @@ def status(
 
 def _list_sessions(repo_path: Path) -> None:
     """Scan-friendly recent-session table (V0.1 spec 4.4)."""
-    from agent_review.progress import PLACEHOLDER_TITLE
+    from agent_review.progress import display_title
 
     sessions = StateStore.list_sessions(repo_path)
     if not sessions:
@@ -255,12 +274,11 @@ def _list_sessions(repo_path: Path) -> None:
         if state is None:
             rows.append((None, sid, "(corrupt state)", None))
             continue
-        title = (state.task_title or "").strip() or PLACEHOLDER_TITLE
         if state.status == SessionStatus.RUNNING:
             outcome = f"RUNNING · {state.phase.value}"
         else:
             outcome = state.status.value
-        rows.append((state.created_at, sid, title, outcome))
+        rows.append((state.created_at, sid, display_title(state), outcome))
     # Newest first; corrupt sessions sink to the bottom.
     rows.sort(key=lambda r: (r[0] is not None, r[0]), reverse=True)
     typer.echo("Recent sessions (newest first)")
@@ -292,6 +310,7 @@ def show(
         "task": ("task.md", "text"),
         "proposal": ("proposal.md", "text"),
         "issues": ("issues.json", "json"),
+        "events": ("events.jsonl", "text"),
     }
     filename, kind = files[what]
     if what == "final":
@@ -361,6 +380,9 @@ def main() -> None:
     subcommands = {"run", "resume", "status", "show"}
     if not argv:
         app(["--help"])
+        return
+    if argv[0] == "--version":
+        typer.echo(f"agent-review-orchestrator {_package_version()}")
         return
     if argv[0] in subcommands or argv[0] in ("--help", "-h", "--version"):
         app()

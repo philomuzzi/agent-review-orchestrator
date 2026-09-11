@@ -21,7 +21,11 @@ def run(o) -> ExitCode | None:
     if not o.state.kind_explicit:
         o.state.task_kind = result.task_kind or TaskKind.CHANGE
     # V0.1: persist the semantic task title unless the user named the session.
-    title = (result.task_title or "").strip()
+    # Host-owned sanitization: agent text is bounded to one printable line
+    # before it becomes presentation metadata (never free-form agent output).
+    from agent_review.progress import sanitize_title
+
+    title = sanitize_title(result.task_title)
     if title and o.state.task_title_source != "user":
         o.state.task_title = title
         o.state.task_title_source = "discover"

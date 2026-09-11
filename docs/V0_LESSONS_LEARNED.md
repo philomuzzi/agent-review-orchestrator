@@ -184,6 +184,35 @@ V0.1 在 V0 基线上增加运行期可观测性与会话呈现层，未改动�
 
 ---
 
+## 8.5 V0.1-RC2 实施记录（2026-09-11）
+
+RC1（`24eb2b5`）在真实联调中表现良好，但审计发现三类同一根源的缺陷：**凡是新增“进入 CLI 呈现面的数据通路”，都必须在宿主侧确定性收口**。详见 `docs/V0_1_IMPLEMENTATION_AUDIT.md`。
+
+### 8.5.1 新经验：呈现层的三条铁律
+
+1. **Agent 文本进入持久化元数据前必须过宿主消毒器**（B001）：task_title 是 agent 自由文本，RC1 直接落盘——探针会话存出 317 字符含 `\n`/`\t` 的标题，直接把 `status --list` 行切裂。修复：`sanitize_title()`（单行、空白折叠、控制符剔除、≤80 字符）在两个入口（DISCOVER、`--name`）统一执行，渲染端 `display_title()` 再消毒一次（防御历史/手改数据）。这与 V0 的 issue 生命周期归一（B001/V0）是同一个模式：**收数据的一方拥有数据形态**。
+2. **渲染器必须保证“一行一事实”与载荷内容无关**（B002）：`SESSION_FAILED` 的 reason 会内嵌 codex stderr 尾部（含换行），一个事件渲染成三行。修复：`_one_line()` 应用于所有自由文本字段 + verbose 回退 dump。教训：**事件流是结构化的，但字段内容不是**；渲染层的线宽契约不能依赖上游文本干净。
+3. **查我清单的路径要把“坏会话”当一等公民**（B003）：一个 state.json 损坏的会话让 `status`/`status --list`/`show`/`resume` 全部裸异常退出，而代码里那行“(corrupt state)”降级分支其实是死代码——**写了降级路径不等于降级路径可达**，必须用探针验证。修复：`load_state` 对缺失/不可读/非法一律返回 None（fail closed），CLI 层接住 AgentError/ValueError 转干净退出码；`recover_phase` 对非法 checkpoint 依旧硬失败（恢复真相不容含糊）。
+
+### 8.5.2 新经验：细节
+
+- **ID 碰撞退路不能破坏格式不变量**（N002）：`-2` 后缀让 id 超出 `YYYYMMDD-HHMMSS-xxxx` 契约；改为重掷随机后缀。任何“格式即契约”的标识符，其异常路径也要过同一正则。
+- **`step()` 恢复路径重载失败时保留内存态**：`load_state` 变宽松后，恢复路径若拿到 None 会把 `self.state` 置空——改为“重载成功才覆盖”，与旧行为（异常时不赋值）语义对齐。改宽一个 API 时，逐个检查它的全部调用点方向是否变宽/变窄。
+- **自动化真实 E2E 的门答答**：msys 管道对 isatty 撒谎（有时 True），`printf | review resume` 又是真管道（False）→ 门答不可依赖；改用脚本化 UI 驱动 `Orchestrator.resume`（真实适配器 + 真实渲染器，复用 CLI 的 stdio 加固），仅人类按键是常量。这也再次验证了 7.3.3：驱动脚本必须走 CLI 入口/复用其加固。
+- **真实 E2E 再次复现 NEED_HUMAN→交接边界**（R001，FACT 类阻塞 + 门预算 2/2 耗尽）：这是正确行为而非缺陷；N007（reviewer 附带决策选项包）继续挂在 V0.5。
+
+### 8.5.3 RC2 验证结论
+
+| 项 | 结果 |
+| --- | --- |
+| 确定性测试 | 171 passed（+19 RC2 回归），2 smoke skip |
+| 真实 smoke | 2 passed（pi 0.85.1 / codex 0.154.0，148.5s） |
+| 真实 E2E① | 门(3+2 决策)→task_revision 3→设计→初审 2 blocking→NEED_HUMAN→HUMAN_HANDOFF(10)，全程心跳/重试/任务修订可见 |
+| 真实 E2E② | 无 --name：占位符→DISCOVER 语义标题（13 字，非截断）→1 门→DONE(0)，`status --list`/`show events`（RC2 新增）均可辨识会话 |
+| Windows 加固 | 两处崩溃修复（rich legacy guard、UTF-8 stdio）在全部新渲染路径下无回归 |
+
+---
+
 ## 9. 快速备忘
 
 ```bash
