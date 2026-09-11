@@ -239,6 +239,14 @@ class Orchestrator:
         relevant ACTIVE decisions, any derivable suggested options and
         the resumability boundary. It is an aid for the Human, never a
         mechanism for the orchestrator to invent decisions.
+
+        V0.2-RC2 (N201): a rendering failure must not silently discard
+        the durable package. A minimal deterministic fallback is written
+        (session id, sanitized reason, blocking issue ids, explicit
+        terminal boundary); if even that fails, the authoritative
+        HUMAN_HANDOFF state stays persisted and a best-effort
+        ``HANDOFF_WRITE_FAILED`` event is emitted. The package failure
+        never overrides the terminal state in either path.
         """
         self.state.handoff_reason = reason
         self.state.phase = Phase.HUMAN_HANDOFF
@@ -260,7 +268,52 @@ class Orchestrator:
         except Exception:
             # The handoff package is an aid; its failure must never mask
             # the terminal handoff state that is already persisted.
-            pass
+            self._write_minimal_handoff(reason)
+
+    def _write_minimal_handoff(self, reason: str) -> None:
+        """N201: deterministic minimal fallback for handoff.md."""
+        from agent_review.progress import sanitize_line  # noqa: PLC0415
+
+        blocking_ids: list[str] = []
+        try:
+            blocking_ids = [
+                i.id
+                for i in self.store.load_issues().issues
+                if i.severity.value == "BLOCKING"
+                and i.status.value in ("OPEN", "ADDRESSED", "NEED_HUMAN")
+            ]
+        except Exception:
+            pass  # ids are best-effort; the reason always survives
+        minimal = (
+            "# Human Handoff\n\n"
+            "## Why the workflow stopped\n\n"
+            f"{sanitize_line(reason)}\n\n"
+            f"- session: {sanitize_line(self.state.session_id)}\n"
+            f"- blocking issue ids: "
+            f"{', '.join(blocking_ids) if blocking_ids else '(unreadable)'}\n"
+            "- this session is terminal and cannot be resumed in place\n"
+            "- the full structured handoff package could not be rendered; "
+            "inspect state.json / issues.json / decisions.json / "
+            "events.jsonl for the complete truth\n"
+        )
+        try:
+            self.store.write_text("handoff.md", minimal)
+            self.event(
+                "HANDOFF_WRITTEN",
+                path=str(self.store.dir / "handoff.md"),
+                fallback="minimal",
+            )
+        except Exception:
+            # Even the minimal write failed: HUMAN_HANDOFF stays
+            # authoritative; surface the packaging failure best-effort.
+            try:
+                self.event(
+                    "HANDOFF_WRITE_FAILED",
+                    reason="minimal handoff.md write failed; "
+                    "HUMAN_HANDOFF state remains authoritative",
+                )
+            except Exception:
+                pass
 
     def _handle_interrupt(self) -> None:
         # Best-effort child abort; adapters without processes no-op.

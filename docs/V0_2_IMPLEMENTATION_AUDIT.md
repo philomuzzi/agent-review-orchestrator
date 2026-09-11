@@ -1,9 +1,9 @@
 # Agent Review Orchestrator V0.2 Implementation Audit
 
-**Status:** V0.2 — implemented; deterministic suite green; real Pi/Codex smoke green; real-agent E2E validated (custom decision, decision coverage, convergence gate, structured handoff)
+**Status:** V0.2-RC2 — implemented; deterministic suite green (255 + 2 skip); real Pi/Codex smoke green; RC2 real-agent validation recorded in §6.4
 **Audit type:** Implementation summary + verification record
-**Implemented against:** `docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md`
-**Baseline:** V0.1-RC3 (`b93f2f0`)
+**Implemented against:** `docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md` + `docs/V0_2_RC2_FIX_SPEC.md`
+**Baseline:** V0.1-RC3 (`b93f2f0`); RC1 remediation baseline `f5038c1`
 
 ---
 
@@ -91,6 +91,104 @@ Combined, the real runs cover all three required E2E shapes: custom decision; do
 9. OPEN → NEED_HUMAN routing is explicitly auditable — met (G25 + renderer line).
 10. Terminal handoff produces durable `handoff.md`, inspectable via CLI — met (D15-D17 + E2E-D).
 11. PROD-001 replay no longer terminates solely on REQUIREMENT category — met (permanent regression).
-12. Full deterministic suite passes without V0/V0.1 regression — met (229 passed; baseline 193 all green).
+12. Full deterministic suite passes without V0/V0.1 regression — met (229 passed at RC1; 255 at RC2).
 13. Real Pi/Codex smoke healthy — met (2/2 smoke within the 24 adapter tests).
 14. Real-agent custom-decision and convergence-gate scenarios pass — met (E2E-A/C/D).
+
+---
+
+## 6. V0.2-RC2 remediation record (B201/B202/B203 + N201/N202)
+
+**Remediation spec:** `docs/V0_2_RC2_FIX_SPEC.md` · **RC1 baseline:** `f5038c1`
+Independent review found three blocking protocol gaps in RC1; all three plus both
+non-blocking findings are closed here. No V0.3+ scope was touched.
+
+### 6.1 B201 — FINAL_REVIEW obeys Human Authority / Convergence Gate semantics
+
+| Aspect | Change |
+| --- | --- |
+| Routing | `run_final()` no longer terminates on failed PASS by category alone: after the audited `ISSUE_NEED_HUMAN` flip it calls the same `try_gate_for_need_human_issues` used by Initial/Closure — **COVERED** → revert-to-OPEN + `continue_blocker_routing` (REVISION/ABLATION only while budget remains, else budget-driven handoff); **NEEDS_NEW** → bounded Convergence Gate (`FINAL_REVIEW → WAITING_FOR_HUMAN`); **CANNOT_DETERMINE / invalid packet / exhausted Human budget** → structured `HUMAN_HANDOFF`. Non-REQUIREMENT/FACT failures keep the legacy "ablation budget exhausted" handoff. |
+| State machine | `FINAL_REVIEW → {WAITING_FOR_HUMAN, REVISION, ABLATION, FINALIZE, HUMAN_HANDOFF}`. A Human decision always rebuilds from the new task revision (gate close → invalidate → INTAKE/INVESTIGATE); Final Review is never "continued in place". |
+| Invariants | Mechanical PASS unchanged (`passed = verdict AND pass_result.passed` — Codex still never decides PASS); ablation budget rule untouched (routing only consumes *remaining* budgets); interruption budget consumed only on gate creation. |
+
+### 6.2 B202 — Problem Mode FACT convergence re-investigation
+
+- `HumanGate.resume_semantics` (new field, validated against `RESUME_SEMANTICS`): the KIND of Human decision a convergence gate establishes, recorded separately from the `CONVERGENCE` provenance category so provenance can no longer erase decision semantics.
+- `compute_resume_semantics()` — deterministic conservative rule: any FACT question forces `FACT` (a Problem-Mode session always re-investigates with the new Human fact instead of pairing it with a stale root-cause model); single common category preserved verbatim; mixed non-FACT packets are `MIXED` and resume via INTAKE. Never depends on `gate.category=CONVERGENCE`.
+- Gate close: `establishes_fact = category == FACT or resume_semantics == FACT`; Problem Mode + establishes_fact → `INVESTIGATE` (the new ACTIVE FACT decision is loaded into the re-investigation context exactly like existing FACT decisions), otherwise `INTAKE`. Normal FACT gates keep their V0 behavior.
+- Audit/render surfaces: `resume_semantics` in `HUMAN_GATE_CREATED`/`CONVERGENCE_GATE_CREATED` payloads, rendered on the convergence-gate progress line and in `human-gate.md`.
+
+### 6.3 B203 — decision-candidate identity/provenance hardening
+
+All validation happens in `resolve_need_human_issues` BEFORE gate creation, budget consumption, or any issue mutation (covered issues are only reverted after every packet validated):
+
+1. **Exact provenance (B203.1):** `outcome.issue_id ∈ candidate.source_issue_ids`, every source id ∈ the current authority-check batch. Unknown ids are **never silently filtered** — the old `if i in issue_ids` gate-construction filter that could launder an invalid packet into a normal gate is gone (validated union taken verbatim).
+2. **Semantic category:** candidate category must be REQUIREMENT/FACT/TRADE_OFF/SCOPE — `CONVERGENCE` rejected with an explicit message (it is a gate routing category). Intake candidate filtering now enforces the same decision-semantic set.
+3. **Option-key uniqueness (B203.2):** enforced with the SAME normalization used for answer matching (`normalize_answer_text`, moved to `models.py`) at two boundaries — `_validate_candidate_packet` (convergence) and the shared `GateQuestion` model validator (normal intake gates inherit it; `eligible_candidates` also suppresses duplicates so intake fails closed without crashing). Recommendation validation runs after uniqueness.
+4. **Decision identity (B203.3):** duplicate `decision_key` across candidates in one batch → fail closed (RC2's chosen option; no merging).
+5. Reserved custom-selector option keys, non-empty keys/labels, 2–4 options, valid recommendation, and the already-ACTIVE `decision_key` rule are all retained/enforced.
+
+### 6.4 N201/N202
+
+- **N201:** `handoff()` now writes a minimal deterministic `handoff.md` fallback (session id, sanitized reason, blocking issue ids, explicit terminal/non-resumable boundary, pointer to the authoritative artifacts) whenever the full render fails; if even that fails, `HANDOFF_WRITE_FAILED` is emitted best-effort. The authoritative `HUMAN_HANDOFF` state can never be masked by a presentation failure (both paths tested).
+- **N202:** the authority-check prompt's contradictory "Do not invent options the Human never saw" is replaced with the correct Human-Authority semantics (options are suggestions; never claim Human approval; the Human may reject all and use the custom-decision path), plus the RC2 packet rules (never `CONVERGENCE`, unique option keys, exact `source_issue_ids`).
+
+### 6.5 RC2 regression suite (new)
+
+`tests/unit/test_v02_rc2_regressions.py` — 26 tests mapping to fix-spec §4 items 1–16:
+
+| Item | Tests |
+| --- | --- |
+| 1 Final Review covered → correction (budget remaining AND exhausted variants) | `test_b201a_*` |
+| 2–3 Final Review new decision → gate → custom/option → rebuild | `test_b201b_*` |
+| 4 Final Review budget exhaustion → structured handoff | `test_b201c_*` (+ `test_b201_final_review_cannot_determine_fails_closed`, `test_final_review_convergence_handoff_written_from_final_review`) |
+| 5–7 Problem FACT convergence → INVESTIGATE with the new ACTIVE fact (option + custom + mixed conservative rule + semantics unit) | `test_b202a/b/mixed`, `test_compute_resume_semantics_deterministic_rules` |
+| 8 Problem REQUIREMENT convergence → INTAKE | `test_b202c_*` |
+| 9–14 packet integrity: unknown source id / outcome-missing provenance / `category=CONVERGENCE` / duplicate keys / duplicate normalized keys / duplicate `decision_key` (+ reserved selector, empty key, shared `GateQuestion` boundary, intake suppression) | `test_b203_*`, `test_gate_question_rejects_duplicate_option_keys`, `test_intake_candidate_with_duplicate_keys_is_suppressed` |
+| 15–16 no gate, no interruption consumed, issue stays auditable, handoff.md explains the boundary | embedded in every `assert_fail_closed_before_gate` case |
+| N201 | `test_n201_*` (fallback written; total-write failure keeps state authoritative) |
+| N202 | `test_n202_authority_check_prompt_options_are_suggestions` |
+
+### 6.6 RC2 verification evidence
+
+- **Deterministic:** 255 passed, 2 skipped (~37s) — RC1 baseline 229 + 26 RC2 regressions, **0 regressions** (V0/V0.1/V0.2 suites, PROD-001 permanent replay, gate consistency, session presentation all unchanged).
+- **Real smoke:** `AGENT_REVIEW_SMOKE=1` full suite 257 passed (~3 min; pi 0.85.1 RPC read-only + codex-cli 0.154.0 `exec -s read-only` probes green).
+- **Real-agent RC2 validation:** §6.7.
+
+### 6.7 Real-agent RC2 E2E
+
+Environment: pi 0.85.1 (RPC, read-only allowlist), codex-cli 0.154.0 (`exec -s read-only`), Windows host, driver `scripts/v02_e2e_driver.py` (only gate keystrokes scripted), scratch repos under `C:\frank\aro-rc2-e2e\` (sessions preserved).
+
+| Run | Session | Scenario | Result |
+| --- | --- | --- | --- |
+| RC2-E2E-A | `20260911-170545-c349` (finalconv, interruptions=3) | e2e_d replay: intake gate → initial-review convergence gate (real NEEDS_NEW + real authority check + custom answer) → rebuild → REVISION → CLOSURE → ABLATION → FINAL_REVIEW with 2 remaining blockers | The full chain reached FINAL_REVIEW under RC2 code; this run's remaining blockers were both DESIGN-classified, so the correct legacy budget handoff fired — RC2 routing did **not** flip a DESIGN blocker (false convergence routing must never happen). Real evidence: `CONVERGENCE_GATE_CREATED resume_semantics=REQUIREMENT` rendered "establishes REQUIREMENT decision(s)"; task_revision 1→3 with two full rebuilds; one agent-side `ablate` truncation recovered via resume. |
+| RC2-E2E-B | `20260911-174619-04b0` (finalconv, interruptions=3) | Hard-requirement request variant: 3 REQUIREMENT blockers at initial review → real authority check: R001/R002 → `ISSUE_COVERED_BY_DECISION [D003, D004]` (real coverage routing), R003 → NEEDS_NEW → **real convergence gate through the B203-hardened packet boundary** (exact provenance + unique keys + semantic category validated on a real Pi packet) → rebuild → budget-exhausted structured handoff | Live-validated the hardened candidate boundary accepting a good real packet, the coverage marker path, `resume_semantics` in the real event stream/rendering, and the budget-exhausted handoff with pending packet (B201-C semantics, reached at initial review this run). |
+| RC2-E2E-C | `20260911-161230-a345` (factvac, Problem Mode, interruptions=3) | Preferred Problem→FACT path attempt: real investigation SUPPORTED → intake gates (incl. a real FACT gate → live re-INVESTIGATION with the new fact) → design → review blockers → REVISION ×2 (agent-side truncation twice, both recovered via resume) → closure → DONE | Real Problem-Mode integrity end-to-end incl. the FACT-gate → re-INVESTIGATE hop and two fail-closed→resume recoveries; the *downstream* FACT convergence hop was absorbed upstream by intake candidates in every attempt (§6.8 limitation 3) and remains deterministic-only. |
+
+**Real-E2E verdict (honest):** the RC2 stack ran every hop it encountered correctly on real agents — real authority checks, real coverage routing, a real convergence gate through the *new* hardened packet boundary with `resume_semantics` audited end-to-end, real rebuilds, real truncation recoveries, and correct non-routing on DESIGN-classified final blockers. The two *newly repaired routing hops* (a gate opening FROM Final Review, and a Problem-Mode FACT convergence re-entering INVESTIGATE) were not live-triggered within the timebox: reaching Final Review with a REQUIREMENT blocker AND remaining interruption budget, and keeping a fact vacuum downstream of intake, are both low-probability real paths (six documented forcing attempts; reviewer category choice and discovery candidate emission are the probabilistic layers). Deterministic coverage of both hops is complete and permanent (§6.5). Per fix-spec §6.12 this leaves exit criterion 12 (focused real E2E on a newly repaired path) **partially met** — the hardened-boundary + resume-semantics surfaces were live-exercised, the repaired routing hops await the next real workflow.
+
+### 6.9 RC2 exit criteria status (fix-spec §6)
+
+1. FINAL_REVIEW obeys the same Human Authority semantics — met (deterministic B201-A/B/C + state-machine edge).
+2. FINAL_REVIEW can enter WAITING_FOR_HUMAN through a valid Convergence Gate — met (deterministic B201-B/C).
+3. Problem Mode FACT convergence causes re-investigation with new Human facts — met (deterministic B202-A/B + investigate-context assertion).
+4. Convergence provenance and semantic category represented separately — met (`resume_semantics` + conservative mixed rule, deterministic).
+5. Candidate provenance exact and mechanically validated — met (B203.1 deterministic; live-validated accepting a good real packet).
+6. Option keys unique, cannot mis-record a Human selection — met (shared model boundary + same normalization; deterministic).
+7. Duplicate decision identities cannot collapse questions — met (fail-closed; deterministic).
+8. All malformed packets fail closed before Gate/budget — met (deterministic, items 9–16).
+9. PROD-001 regression green — met.
+10. Full deterministic suite, no regression — met (255 passed, 0 regressions).
+11. Real Pi/Codex smoke healthy — met (257 passed incl. 2 real smokes).
+12. Focused real-agent E2E on a newly repaired path — **partially met** (§6.7 verdict): hardened packet boundary + `resume_semantics` live-exercised; the FINAL_REVIEW-gate and Problem-FACT routing hops remain deterministic-only pending the next real workflow.
+13/14. Audit + lessons docs updated — met (this record; `V0_LESSONS_LEARNED.md` §11).
+
+**Readiness:** V0.2-RC2 protocol is complete and deterministic-proven; because criterion 12 is only partially met, the V0.2 spec status is **not** flipped to "validated ready" — the recommendation is to treat the next real Shopify workflow as the confirming run (it exercises the protocol exactly as repaired; any terminal outcome is protocol-correct).
+
+### 6.8 Remaining limitations (RC2)
+
+1. Terminal handoff sessions remain non-resumable (V0 boundary, unchanged).
+2. Authority-check judgment quality remains Pi's; the orchestrator validates structure and ACTIVE references only (unchanged RC1 stance, bounded by the durable coverage marker).
+3. Forcing the *downstream* Problem-Mode FACT vacuum on real agents proved impractical within RC2's timebox: intake gates legitimately absorb fact-shaped candidates whenever the request reveals the vacuum, and request wording that hides it tends to produce clean-passing designs (six documented attempts). Deterministic coverage (B202-A/B/C + mixed rule) is complete; the next real Shopify problem-mode workflow is expected to exercise this path naturally, and V0.3 telemetry should count convergence-gate resume semantics.
+4. Reviewer category choice (REQUIREMENT vs DESIGN) remains the probabilistic layer the spec assigns to Codex; RC2 guarantees the *routing* is correct for whichever category the reviewer uses — never more, never less.
+5. Agent-side long-output truncation (`revise`/`ablate`) recurred on RC2 real runs (3 occurrences, 3 recoveries via the documented FAILED→resume path). Agent-side, not orchestrator-side; stance unchanged.

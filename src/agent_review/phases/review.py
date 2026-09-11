@@ -392,6 +392,25 @@ def run_final(o) -> ExitCode | None:
     if passed:
         o.transition(Phase.FINALIZE)
         return None
+    # V0.2-RC2 (B201): Final Review obeys the same Human Authority
+    # semantics as Initial/Closure Review. A blocking REQUIREMENT/FACT
+    # issue no longer terminates the session by category alone: an
+    # audited NEED_HUMAN flip runs the Human Authority Check; semantics
+    # already covered by an ACTIVE decision route into the correction
+    # ladder allowed by the remaining budgets; a genuine new Human
+    # decision opens a bounded Convergence Gate
+    # (FINAL_REVIEW -> WAITING_FOR_HUMAN) and the workflow rebuilds from
+    # the new task revision — it never "continues Final Review in
+    # place". Undeterminable packets and exhausted Human budget fail
+    # closed to a structured HUMAN_HANDOFF. Codex still never decides
+    # PASS: the verdict above only mattered when it passed.
+    need_human = _need_human_ids(o)
+    if need_human:
+        from agent_review.phases import human_gate
+
+        return human_gate.try_gate_for_need_human_issues(
+            o, need_human, allow_revision=True
+        )
     o.handoff(
         "ablation budget exhausted: design still fails requirement or blockers "
         "remain unresolved after final review"

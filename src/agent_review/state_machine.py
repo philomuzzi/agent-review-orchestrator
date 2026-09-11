@@ -50,7 +50,18 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
         Phase.WAITING_FOR_HUMAN,
         Phase.HUMAN_HANDOFF,
     },
-    Phase.FINAL_REVIEW: {Phase.FINALIZE, Phase.HUMAN_HANDOFF},
+    Phase.FINAL_REVIEW: {
+        Phase.FINALIZE,
+        # V0.2-RC2 (B201): Final Review obeys the same Human Authority /
+        # Convergence Gate semantics as Initial/Closure Review. A true new
+        # Human decision may open a bounded Convergence Gate; a blocker
+        # proven covered by an ACTIVE decision may consume remaining
+        # correction budget instead of terminating by category alone.
+        Phase.WAITING_FOR_HUMAN,
+        Phase.REVISION,
+        Phase.ABLATION,
+        Phase.HUMAN_HANDOFF,
+    },
     Phase.FINALIZE: {Phase.DONE},
     # Terminal states: no outbound transitions.
     Phase.DONE: set(),

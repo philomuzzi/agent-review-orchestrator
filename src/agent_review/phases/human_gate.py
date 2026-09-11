@@ -20,12 +20,12 @@ This module owns:
 from __future__ import annotations
 
 import hashlib
-import re
 
 from agent_review.models import (
     AnswerValidation,
     AnswerType,
     AuthorityOutcome,
+    DECISION_SEMANTIC_CATEGORIES,
     Decision,
     DecisionCandidate,
     DecisionSource,
@@ -42,9 +42,14 @@ from agent_review.models import (
     IssueStatus,
     Phase,
     SessionStatus,
+    TaskKind,
+    normalize_answer_text,
 )
 
-ALLOWED_CATEGORIES = {c.value for c in GateCategory}
+# Human decision semantic categories for BOTH intake candidates and
+# authority-check candidates (V0.2-RC2 B203). CONVERGENCE is a gate
+# routing category — never a Human decision semantic.
+DECISION_CATEGORIES = set(DECISION_SEMANTIC_CATEGORIES)
 MAX_QUESTIONS_PER_GATE = 3
 MAX_ANSWER_PASSES = 2  # bounded re-ask rounds before waiting again
 
@@ -108,12 +113,15 @@ def eligible_candidates(
     reserved = {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}
     for candidate in candidates:
         key = candidate_key_of(candidate)
-        if candidate.category not in ALLOWED_CATEGORIES:
+        if candidate.category not in DECISION_CATEGORIES:
             suppressed.append(candidate)
             o.event(
                 "HUMAN_CANDIDATE_SUPPRESSED",
                 decision_key=key,
-                reason=f"category not gate-worthy: {candidate.category}",
+                reason=(
+                    f"category not a Human decision semantic "
+                    f"(REQUIREMENT/FACT/TRADE_OFF/SCOPE): {candidate.category}"
+                ),
             )
         elif len(candidate.options) < 2:
             suppressed.append(candidate)
@@ -122,12 +130,29 @@ def eligible_candidates(
                 decision_key=key,
                 reason="fewer than 2 meaningful options",
             )
+        elif any(not op.key.strip() or not op.label.strip() for op in candidate.options):
+            suppressed.append(candidate)
+            o.event(
+                "HUMAN_CANDIDATE_SUPPRESSED",
+                decision_key=key,
+                reason="option keys and labels must be non-empty",
+            )
         elif any(_norm(op.key) in reserved for op in candidate.options):
             suppressed.append(candidate)
             o.event(
                 "HUMAN_CANDIDATE_SUPPRESSED",
                 decision_key=key,
                 reason="option key collides with the reserved custom-decision selector",
+            )
+        elif len({_norm(op.key) for op in candidate.options}) != len(candidate.options):
+            # Same invariant as the GateQuestion model boundary
+            # (V0.2-RC2 B203.2): options indistinguishable by answer
+            # matching must never reach a Human.
+            suppressed.append(candidate)
+            o.event(
+                "HUMAN_CANDIDATE_SUPPRESSED",
+                decision_key=key,
+                reason="duplicate option keys after normalization",
             )
         elif key in decided:
             # Human answer is session fact; never re-ask unless superseded.
@@ -157,11 +182,34 @@ def _to_question(candidate: HumanCandidate) -> GateQuestion:
 # ---------------------------------------------------------------------------
 
 
+def compute_resume_semantics(questions: list[GateQuestion]) -> str:
+    """Deterministic resume semantic for a Convergence Gate (B202).
+
+    ``CONVERGENCE`` records WHERE the gate came from; this function
+    records WHAT KIND of Human decision it establishes, derived from
+    the validated question categories:
+
+    - any FACT question forces ``FACT`` — a Problem-Mode session must
+      re-investigate with the new Human fact instead of combining it
+      with a stale root-cause model (conservative mixed-packet rule);
+    - a single common category is preserved verbatim;
+    - mixed non-FACT packets are ``MIXED`` and resume through INTAKE.
+    """
+    categories = {(q.category or "").strip().upper() for q in questions}
+    categories.discard("")
+    if "FACT" in categories:
+        return GateCategory.FACT.value
+    if len(categories) == 1:
+        return next(iter(categories))
+    return "MIXED"
+
+
 def create_gate(
     o,
     questions: list[GateQuestion],
     remaining_keys: list[str] | None = None,
     source_issue_ids: list[str] | None = None,
+    resume_semantics: str = "",
 ) -> HumanGate | None:
     """Create the decision packet; None means the interruption budget said no."""
     if o.state.budgets.human_interruptions_used >= o.state.limits.max_human_interruptions:
@@ -187,6 +235,7 @@ def create_gate(
         questions=questions[:MAX_QUESTIONS_PER_GATE],
         remaining_candidate_keys=remaining_keys or [],
         source_issue_ids=list(source_issue_ids or []),
+        resume_semantics=resume_semantics if is_convergence else "",
     )
     log.next_gate_number += 1
     log.current = gate
@@ -200,6 +249,7 @@ def create_gate(
         questions=[q.decision_key for q in gate.questions],
         category=gate.category.value,
         source_issue_ids=gate.source_issue_ids,
+        resume_semantics=gate.resume_semantics or None,
     )
     if is_convergence:
         o.event(
@@ -207,6 +257,7 @@ def create_gate(
             gate_id=gate.gate_id,
             questions=[q.decision_key for q in gate.questions],
             source_issue_ids=gate.source_issue_ids,
+            resume_semantics=gate.resume_semantics or None,
         )
     o.transition(Phase.WAITING_FOR_HUMAN, status=SessionStatus.RUNNING)
     return gate
@@ -218,9 +269,10 @@ def create_gate(
 
 
 def _norm(text: str) -> str:
-    text = text.strip().lower()
-    text = re.sub(r"[\s\-_·、,，。;；:：]+", " ", text)
-    return text.strip(" .?!!")
+    # The canonical normalization lives in models so the shared
+    # GateQuestion boundary enforces the same key uniqueness that
+    # answer matching relies on (V0.2-RC2 B203.2).
+    return normalize_answer_text(text)
 
 
 def match_option(question: GateQuestion, raw: str) -> GateOption | None:
@@ -509,34 +561,55 @@ def _active_decisions(o) -> list[Decision]:
 
 
 def _validate_candidate_packet(
-    o, candidate: DecisionCandidate, decided_keys: set[str], issue_ids: list[str]
+    o,
+    candidate: DecisionCandidate,
+    decided_keys: set[str],
+    outcome_issue_id: str,
+    batch_issue_ids: list[str],
 ) -> str | None:
-    """Mechanical validation of a decision candidate packet.
+    """Mechanical validation of a decision candidate packet (V0.2-RC2 B203).
 
     Returns an error string when the packet must be rejected (fail
-    closed); None when it is gate-ready. Same structural rules as a
-    normal Human Gate candidate (spec V0.2 5.4).
+    closed BEFORE gate creation, budget consumption or issue mutation);
+    None when it is gate-ready. Same structural rules as a normal Human
+    Gate candidate (spec V0.2 5.4) plus the RC2 identity/provenance
+    hardening: exact source-issue provenance, decision-semantic
+    category, unique option keys and a unique decision identity.
     """
-    if candidate.category not in ALLOWED_CATEGORIES:
+    if candidate.category not in DECISION_CATEGORIES:
         return (
-            f"decision candidate category not gate-worthy: "
-            f"{candidate.category!r}"
+            f"decision candidate category {candidate.category!r} is not a "
+            "Human decision semantic category "
+            "(REQUIREMENT/FACT/TRADE_OFF/SCOPE); CONVERGENCE is a gate "
+            "routing category and can never be a decision semantic"
         )
     if not candidate.question.strip():
         return "decision candidate question is empty"
     if not (2 <= len(candidate.options) <= 4):
         return (
-            f"decision candidate for issue(s) {candidate.source_issue_ids or issue_ids} "
+            f"decision candidate for issue(s) {candidate.source_issue_ids or [outcome_issue_id]} "
             f"requires 2-4 options, got {len(candidate.options)}"
         )
+    reserved = {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}
+    seen_keys: set[str] = set()
     for option in candidate.options:
         if not option.key.strip() or not option.label.strip():
             return "decision candidate options require non-empty key and label"
-        if _norm(option.key) in {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}:
+        if _norm(option.key) in reserved:
             return (
                 f"option key {option.key!r} collides with the reserved "
                 "custom-decision selector"
             )
+        normalized = _norm(option.key)
+        if normalized in seen_keys:
+            # B203.2: options indistinguishable by answer matching could
+            # persist a Human selection with another option's label.
+            return (
+                f"decision candidate for issue(s) "
+                f"{candidate.source_issue_ids or [outcome_issue_id]} has "
+                f"duplicate option keys after normalization: {option.key!r}"
+            )
+        seen_keys.add(normalized)
     if candidate.recommendation is not None:
         keys = {option.key for option in candidate.options}
         if candidate.recommendation not in keys:
@@ -550,8 +623,24 @@ def _validate_candidate_packet(
             f"decision candidate key {key} is already decided ACTIVE; the "
             "authority outcome contradicts itself (should have been COVERED)"
         )
+    # B203.1: provenance must be exact. The candidate must carry the
+    # outcome's own issue and may only reference issues from the current
+    # authority-check batch — unknown ids are never silently filtered
+    # (filtering could turn an invalid convergence packet into a normal
+    # gate and lose the Convergence provenance entirely).
     if not candidate.source_issue_ids:
         return "decision candidate requires source_issue_ids"
+    if outcome_issue_id not in candidate.source_issue_ids:
+        return (
+            f"decision candidate source_issue_ids {candidate.source_issue_ids} "
+            f"do not include the outcome issue {outcome_issue_id}"
+        )
+    unknown = [i for i in candidate.source_issue_ids if i not in batch_issue_ids]
+    if unknown:
+        return (
+            f"decision candidate references source issue id(s) {unknown} "
+            f"outside the current authority-check batch {batch_issue_ids}"
+        )
     return None
 
 
@@ -641,6 +730,7 @@ def resolve_need_human_issues(
 
     covered: list[tuple[object, list[str], str]] = []
     candidates: list[tuple[object, DecisionCandidate]] = []
+    candidate_keys: dict[str, str] = {}  # decision_key -> issue_id (B203.3)
     for issue_id in issue_ids:
         outcome = by_issue[issue_id]
         if outcome.outcome == AuthorityOutcome.COVERED_BY_ACTIVE_DECISION:
@@ -657,7 +747,7 @@ def resolve_need_human_issues(
         elif outcome.outcome == AuthorityOutcome.NEEDS_NEW_HUMAN_DECISION:
             candidate = outcome.decision_candidate
             error = _validate_candidate_packet(
-                o, candidate, decided_keys, [issue_id]
+                o, candidate, decided_keys, issue_id, list(issue_ids)
             )
             if error is not None:
                 o.handoff(
@@ -665,6 +755,20 @@ def resolve_need_human_issues(
                     "failing closed"
                 )
                 return int(ExitCode.HUMAN_HANDOFF)
+            key = candidate_decision_key(candidate.category, candidate.question)
+            if key in candidate_keys:
+                # B203.3: gate answer tracking is keyed by decision_key;
+                # two questions collapsing onto one identity could make
+                # one answer satisfy both and corrupt supersession
+                # semantics. Fail closed before any mutation.
+                o.handoff(
+                    f"human authority check produced duplicate decision_key "
+                    f"{key} for issues {candidate_keys[key]} and {issue_id}; "
+                    "distinct Human questions must not collapse into one "
+                    "decision identity; failing closed"
+                )
+                return int(ExitCode.HUMAN_HANDOFF)
+            candidate_keys[key] = issue_id
             candidates.append((outcome, candidate))
         else:  # CANNOT_DETERMINE
             o.handoff(
@@ -733,9 +837,12 @@ def resolve_need_human_issues(
                 recommendation=candidate.recommendation,
             )
         )
-        gate_source_issues.extend(
-            i for i in candidate.source_issue_ids if i in issue_ids
-        )
+        # Exact provenance (B203.1): validation already guaranteed every
+        # source id belongs to this authority-check batch, so the union
+        # is taken verbatim — never silently filtered.
+        for source_id in candidate.source_issue_ids:
+            if source_id not in gate_source_issues:
+                gate_source_issues.append(source_id)
     remaining: list[str] = []
     if len(questions) > MAX_QUESTIONS_PER_GATE:
         remaining = [q.decision_key for q in questions[MAX_QUESTIONS_PER_GATE:]]
@@ -746,7 +853,11 @@ def resolve_need_human_issues(
             deferred=remaining,
         )
     gate = create_gate(
-        o, questions, remaining_keys=remaining, source_issue_ids=gate_source_issues
+        o,
+        questions,
+        remaining_keys=remaining,
+        source_issue_ids=gate_source_issues,
+        resume_semantics=compute_resume_semantics(questions),
     )
     if gate is None:
         # Budget exhausted: create_gate already generated the handoff
@@ -901,7 +1012,17 @@ def run(o) -> ExitCode | None:
     # Re-run intake: rebuilds the contract with confirmed decisions and
     # re-evaluates remaining candidates (REQUIREMENT_TOO_AMBIGUOUS path).
     # Problem Mode re-investigates with the new human facts.
-    if o.state.task_kind == "PROBLEM" and gate.category == GateCategory.FACT:
+    #
+    # V0.2-RC2 (B202): the gate's CONVERGENCE provenance must not erase
+    # WHAT was decided — a convergence gate whose effective Human
+    # decision establishes FACT semantics re-enters INVESTIGATE so the
+    # new authoritative fact is never combined with a stale root-cause
+    # model. Normal gates keep using their own category.
+    establishes_fact = (
+        gate.category == GateCategory.FACT
+        or gate.resume_semantics == GateCategory.FACT.value
+    )
+    if o.state.task_kind == TaskKind.PROBLEM and establishes_fact:
         o.transition(Phase.INVESTIGATE)
     else:
         o.transition(Phase.INTAKE)

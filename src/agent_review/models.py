@@ -6,6 +6,7 @@ orchestrator, agent adapters and persisted session state.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -15,6 +16,22 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def normalize_answer_text(text: str) -> str:
+    """Canonical normalization for answer/option-key matching (V0.2-RC2 B203.2).
+
+    The SAME normalization is used for (a) matching a Human answer onto
+    an option and (b) enforcing option-key uniqueness, so a set of
+    options that cannot be distinguished by answer matching can never
+    be persisted as a GateQuestion (a Human selection by index could
+    otherwise be recorded with another option's label). Kept in models
+    so the shared GateQuestion boundary inherits it without importing
+    phase code.
+    """
+    text = text.strip().lower()
+    text = re.sub(r"[\s\-_·、,，。;；:：]+", " ", text)
+    return text.strip(" .?!!")
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +99,30 @@ class GateCategory(str, Enum):
     TRADE_OFF = "TRADE_OFF"
     SCOPE = "SCOPE"
     CONVERGENCE = "CONVERGENCE"
+
+
+# Human decision semantic categories (V0.2-RC2 B203). CONVERGENCE is a
+# Gate routing/provenance category — where a gate came from — and must
+# never be used as the semantic category of a Human Decision itself.
+DECISION_SEMANTIC_CATEGORIES = {
+    GateCategory.REQUIREMENT.value,
+    GateCategory.FACT.value,
+    GateCategory.TRADE_OFF.value,
+    GateCategory.SCOPE.value,
+}
+
+# Valid HumanGate.resume_semantics values (V0.2-RC2 B202). The resume
+# semantic records WHAT KIND of Human decision a convergence gate
+# establishes, separately from the CONVERGENCE provenance category.
+# MIXED = mixed non-FACT semantics (any FACT question forces FACT so a
+# Problem-Mode session always re-investigates with the new Human fact).
+RESUME_SEMANTICS = {
+    GateCategory.REQUIREMENT.value,
+    GateCategory.FACT.value,
+    GateCategory.TRADE_OFF.value,
+    GateCategory.SCOPE.value,
+    "MIXED",
+}
 
 
 class GateStatus(str, Enum):
@@ -438,6 +479,19 @@ class GateQuestion(BaseModel):
                 f"GateQuestion '{self.decision_key}' requires 2-4 options, "
                 f"got {len(self.options)}"
             )
+        # Uniqueness BEFORE recommendation membership (V0.2-RC2 B203.2):
+        # duplicate keys — exact or after the answer-matching
+        # normalization — could persist a Human selection with another
+        # option's label. Fail closed; never auto-rename agent keys.
+        seen: set[str] = set()
+        for option in self.options:
+            normalized = normalize_answer_text(option.key)
+            if normalized in seen:
+                raise ValueError(
+                    f"GateQuestion '{self.decision_key}' has duplicate option "
+                    f"keys after normalization: {option.key!r}"
+                )
+            seen.add(normalized)
         if self.recommendation is not None:
             keys = {o.key for o in self.options}
             if self.recommendation not in keys:
@@ -484,7 +538,25 @@ class HumanGate(BaseModel):
     # Convergence provenance (V0.2): review issue ids this gate was
     # derived from. Empty for normal intake/fact gates.
     source_issue_ids: list[str] = Field(default_factory=list)
+    # V0.2-RC2 (B202): what KIND of Human decision this gate establishes
+    # (REQUIREMENT/FACT/TRADE_OFF/SCOPE, or MIXED for mixed non-FACT
+    # packets). ``category`` stays CONVERGENCE for provenance; the resume
+    # semantic — derived deterministically from the validated candidate
+    # categories at creation — decides the resume phase, so a Problem-Mode
+    # FACT convergence decision re-enters INVESTIGATE instead of pairing
+    # a new Human fact with a stale root-cause model. Empty for normal
+    # gates (their own category carries the semantics).
+    resume_semantics: str = ""
     answered_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _resume_semantics_shape(self) -> "HumanGate":
+        if self.resume_semantics and self.resume_semantics not in RESUME_SEMANTICS:
+            raise ValueError(
+                f"HumanGate '{self.gate_id}' resume_semantics must be one of "
+                f"{sorted(RESUME_SEMANTICS)}, got {self.resume_semantics!r}"
+            )
+        return self
 
     def effective_answers(self) -> list[GateAnswer]:
         """Latest answer per decision_key (V0.2 Capability D).

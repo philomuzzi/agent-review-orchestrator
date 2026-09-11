@@ -46,24 +46,36 @@ For EVERY listed issue, return exactly one outcome:
 2. `NEEDS_NEW_HUMAN_DECISION` — no existing decision establishes the
    semantics; only the Human can decide. You MUST then produce a
    gate-ready `decision_candidate`:
-   - `category`: REQUIREMENT | FACT | TRADE_OFF | SCOPE;
+   - `category`: REQUIREMENT | FACT | TRADE_OFF | SCOPE — never
+     CONVERGENCE (that is a gate routing category, not a Human
+     decision semantic);
    - `question`: one focused, decision-ready question;
    - `why_human`: why this cannot be derived from the repository or
      the existing decisions;
    - `options`: 2-4 meaningful, mutually distinct options, each with
-     `key`, `label`, `impact`;
+     `key`, `label`, `impact`; option keys must be unique (including
+     after case/whitespace normalization) and must not collide with
+     the reserved custom selectors `0` / `custom` / `自定义`;
    - `recommendation`: an option key or null (only when genuinely
      justified);
-   - `source_issue_ids`: the issue ids this candidate resolves.
+   - `source_issue_ids`: the issue ids this candidate resolves — they
+     must come from the pending list above and MUST include the issue
+     this outcome is for.
    Invalid packets (fewer than 2 options, unknown recommendation,
-   empty question) are rejected and the workflow fails closed.
+   empty question, duplicate or colliding option keys, non-semantic
+   category, wrong or unknown source issue ids) are rejected and the
+   workflow fails closed.
 
 3. `CANNOT_DETERMINE` — you cannot safely judge coverage and cannot
    derive a safe packet. The workflow hands off to the Human instead
    of guessing. Do not misuse this to avoid work.
 
-Do not invent coverage. Do not invent options the Human never saw. Do
-not re-ask semantics an ACTIVE decision already established.
+Do not invent coverage. Do not claim that any proposed option is
+already a Human-approved decision: the 2-4 candidate options you
+propose for NEEDS_NEW_HUMAN_DECISION are suggestions only — the Human
+may reject all of them and define a different decision through the
+explicit custom-decision path. Do not re-ask semantics an ACTIVE
+decision already established.
 
 ## Output
 

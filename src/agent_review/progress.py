@@ -505,11 +505,14 @@ class ProgressRenderer:
         gate_id = event.get("gate_id", "")
         questions = event.get("questions", [])
         source = event.get("source_issue_ids", [])
+        semantics = sanitize_line(event.get("resume_semantics", ""))
         line = (
             f"{self._stamp(event)} {SYMBOL_GATE} CONVERGENCE GATE · "
             f"{len(questions)} decision(s) from review issue(s) "
             f"{', '.join(source) or '-'}"
         )
+        if semantics:
+            line += f" · establishes {semantics} decision(s)"
         if self._verbose():
             line += f" [{gate_id}: {', '.join(questions)}]"
         self._write(line)
@@ -533,6 +536,16 @@ class ProgressRenderer:
             f"{self._stamp(event)} {SYMBOL_DONE} issue {issue_id} already "
             f"decided by {', '.join(decision_ids) or '-'} · routed as a "
             "solution gap"
+        )
+
+    def _on_handoff_write_failed(self, event: dict) -> None:
+        # N201: even the minimal fallback failed. The authoritative
+        # HUMAN_HANDOFF state stays persisted; make the packaging gap
+        # visible instead of silently losing the durable package.
+        self._write(
+            f"{self._stamp(event)} {SYMBOL_FAIL} handoff.md could not be "
+            "written; HUMAN_HANDOFF state remains authoritative "
+            "(see state.json / events.jsonl)"
         )
 
     def _on_human_gate_waiting_noninteractive(self, event: dict) -> None:

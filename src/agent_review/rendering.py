@@ -172,6 +172,12 @@ def render_gate(gate: HumanGate) -> str:
         parts.append(
             f"- derived from review issues: {', '.join(gate.source_issue_ids)}"
         )
+    if gate.resume_semantics:
+        # V0.2-RC2 (B202): the CONVERGENCE provenance category never
+        # erases what kind of Human decision the gate establishes.
+        parts.append(
+            f"- established decision semantics: {gate.resume_semantics}"
+        )
     if gate.answered_at is not None:
         parts.append(f"- answered at: {gate.answered_at.isoformat()}")
     parts.append("")
