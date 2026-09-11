@@ -56,13 +56,29 @@ def _read_json(path: Path) -> Any | None:
         return json.load(fh)
 
 
-def new_session_id() -> str:
+def local_now() -> datetime:
+    """Host-local wall-clock time, timezone-aware (B203).
+
+    Injectable seam for tests: monkeypatch this function (or pass ``now``
+    to :func:`new_session_id`) to control the clock without depending on
+    the machine timezone.
+    """
+    return datetime.now().astimezone()
+
+
+def new_session_id(now: datetime | None = None) -> str:
     """Compact, stable, filesystem-safe id independent of request wording.
 
     Format: ``YYYYMMDD-HHMMSS-xxxx`` where the 4-hex suffix is random
     (spec V0.1 4.1). The directory name is never renamed afterwards.
+
+    The timestamp portion is the HOST LOCAL wall-clock time (B203): the id
+    is human-facing presentation with no timezone suffix, so it must read
+    like the user's clock. It carries no ordering semantics — persisted,
+    timezone-aware ``state.created_at`` remains the single ordering truth
+    for session resolution (see ``StateStore._creation_ordered``).
     """
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = (now if now is not None else local_now()).strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{secrets.token_hex(2)}"
 
 

@@ -35,9 +35,11 @@ artifact paths, issue IDs, task revisions and budget state; `--quiet`
 shows only gates, errors and the final result (for scripting/CI).
 
 Sessions live under `.review/<session-id>/` where the id is compact and
-request-independent (`20260910-103638-a7f3`). A semantic `task_title`
-(produced by DISCOVER, overridable with `--name`) is persisted in
-`state.json` and shown by `status` / `resume` / `show` / `status --list`;
+request-independent (`20260910-103638-a7f3`); the id timestamp is the
+host machine's **local wall-clock time** (ordering always uses the
+persisted `created_at` metadata, never the visible id). A semantic
+`task_title` (produced by DISCOVER, overridable with `--name`) is persisted
+in `state.json` and shown by `status` / `resume` / `show` / `status --list`;
 the directory itself is never renamed.
 
 Answer a Human Gate by running `review resume` in a terminal; or read

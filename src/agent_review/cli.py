@@ -183,13 +183,26 @@ def resume(
         )
     except (AgentError, ValueError) as exc:
         # Corrupt/missing session state or an invalid recovery checkpoint:
-        # fail closed with a clean message instead of a traceback.
-        _echo_exit(ExitCode.FAILED, f"Cannot resume session {sid}: {exc}")
+        # fail closed with a clean message instead of a traceback. The
+        # exception text crosses the same host-owned presentation boundary
+        # as every other terminal summary (B201).
+        from agent_review.progress import sanitize_line
+
+        _echo_exit(ExitCode.FAILED, f"Cannot resume session {sid}: {sanitize_line(exc)}")
     _report(orchestrator, repo_path)
 
 
 def _report(orchestrator, repo_path: Path) -> None:
-    """Run the orchestrator, print a per-exit-code summary and exit."""
+    """Run the orchestrator, print a per-exit-code summary and exit.
+
+    Final exit summaries normalize state-carried free text through the
+    same host-owned ``sanitize_line`` boundary the progress renderer uses
+    (B201): ``state.error`` / ``state.handoff_reason`` may embed agent
+    stderr tails, so the summary must obey the identical one-line safety
+    rules as rendered events — one boundary, not two.
+    """
+    from agent_review.progress import sanitize_line
+
     code = orchestrator.run()
     state = orchestrator.state
     session_dir = review_root(repo_path) / state.session_id
@@ -202,11 +215,11 @@ def _report(orchestrator, repo_path: Path) -> None:
             f"(packet: {session_dir / 'human-gate.md'})",
         )
     if code == ExitCode.HUMAN_HANDOFF:
-        reason = state.handoff_reason or "task-level boundary reached"
+        reason = sanitize_line(state.handoff_reason or "task-level boundary reached")
         _echo_exit(code, f"HUMAN_HANDOFF: {reason} (session: {session_dir})")
     if code == ExitCode.INTERRUPTED:
         _echo_exit(code, f"INTERRUPTED: resume with 'review resume {state.session_id}'")
-    _echo_exit(code, f"FAILED: {state.error or 'unexpected failure'}")
+    _echo_exit(code, f"FAILED: {sanitize_line(state.error or 'unexpected failure')}")
 
 
 @app.command()
@@ -303,27 +316,27 @@ def show(
     if sid is None:
         _echo_exit(ExitCode.FAILED, "No sessions found under .review/")
     store = StateStore(repo_path, sid)
+    # Fail closed on corrupt session state BEFORE touching any artifact
+    # (B202): a corrupt session must never emit artifact bodies, even when
+    # the requested file exists and is readable. No auto-repair in RC3.
+    state = store.load_state()
+    if state is None:
+        _echo_exit(ExitCode.FAILED, f"Corrupt session state: {store.dir}")
 
     files = {
-        "final": ("final.md", "text"),
-        "gate": ("human-gate.md", "text"),
-        "task": ("task.md", "text"),
-        "proposal": ("proposal.md", "text"),
-        "issues": ("issues.json", "json"),
-        "events": ("events.jsonl", "text"),
+        "final": "final.md",
+        "gate": "human-gate.md",
+        "task": "task.md",
+        "proposal": "proposal.md",
+        "issues": "issues.json",
+        "events": "events.jsonl",
     }
-    filename, kind = files[what]
-    if what == "final":
-        content = store.read_text("final.md")
-    else:
-        content = store.read_text(filename)
+    content = store.read_text(files[what])
     if content is None:
         _echo_exit(ExitCode.FAILED, f"'{what}' not available yet for session {sid}")
-    state = store.load_state()
-    if state is not None:
-        for line in _session_header_lines(state):
-            typer.echo(line)
-        typer.echo("")
+    for line in _session_header_lines(state):
+        typer.echo(line)
+    typer.echo("")
     typer.echo(content.rstrip())
     raise typer.Exit(ExitCode.DONE)
 

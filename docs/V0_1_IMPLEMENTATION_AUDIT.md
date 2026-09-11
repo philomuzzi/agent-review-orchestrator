@@ -1,9 +1,74 @@
 # Agent Review Orchestrator V0.1 Implementation Audit
 
-**Status:** V0.1-RC2 — remediated; real-agent validated; ready for the real Shopify validation gate
-**Audit type:** Static implementation review (+ RC2 dynamic verification)
+**Status:** V0.1-RC3 — remediated; real-agent validated; ready for the real Shopify validation gate
+**Audit type:** Static implementation review (+ RC2/RC3 dynamic verification)
 **Implementation commit (RC1):** `24eb2b52fd2d18088edb0bbd258f331376ba45f1`
 **Reviewed against:** `docs/V0_1_RUNTIME_PROGRESS_VISIBILITY_SPEC.md`
+
+---
+
+## RC3 remediation record — 2026-09-11
+
+Post-RC2 review found three remaining runtime/session presentation
+defects (spec: `docs/V0_1_RC3_FIX_SPEC.md`, baseline RC2 `21dca9d`). All
+three share one root cause family with RC1/RC2: **new data paths into the
+human-facing surface that were not closed behind a host-owned boundary**.
+All are resolved with focused deterministic regressions; no V0/V0.1
+workflow semantics, PASS rules, budgets, recovery semantics, or agent
+permissions were touched.
+
+### Blocking findings
+
+| Finding | Confirmed root cause | RC3 correction | Verification |
+| --- | --- | --- | --- |
+| B201 / CLI exit summary bypass | `ProgressRenderer` sanitized event payloads via the one-line boundary, but CLI `_report()` printed `state.handoff_reason` / `state.error` raw — a second presentation path with different guarantees for the same text. | The renderer's `_one_line` is now the **public** host-owned `sanitize_line()` (`progress.py`); `_report()` normalizes the `FAILED` and `HUMAN_HANDOFF` reasons and the `resume` failure message through that same helper. One boundary, one implementation, zero duplicated logic. | CLI-level regressions drive the **complete `_report()` path** via scripted fake adapters (`build_adapters` patched): multiline/tab/ANSI/NUL FAILED reason and HUMAN_HANDOFF reason each render as exactly one safe line (`test_cli_failed_summary_single_line_full_report_path`, `test_cli_handoff_summary_single_line_full_report_path`); the rendered `✗ FAILED ·` event line and the `FAILED:` summary line carry the identical collapsed reason (`…_share_boundary`); CJK reasons stay readable. Pre-fix stash-verify: both tests fail on RC2 code (raw multiline summary reproduced). |
+| B202 / `review show` not truly fail closed | `show` read the requested artifact **before** validating session state; with a valid artifact + corrupt `state.json` the command emitted the body and exited 0. The RC2 corrupt-session test passed only because its session had no artifact — it did not prove the intended boundary. | `show` now loads and validates `state.json` **first** for every session-oriented kind (`final`/`gate`/`task`/`proposal`/`issues`/`events`); corrupt/missing state → clean `Corrupt session state: <dir>` message, exit 30, no header, no artifact body, no traceback. No auto-repair (unchanged RC2 stance). | Regressions create the "dangerous success" precondition explicitly: a real DONE session with a real `final.md` (and `events.jsonl`) + corrupted `state.json` → exit 30, `# Final Design` body never appears; a sentinel-body loop across all six kinds proves validation precedes output for every path; healthy `show final`/`show events` behavior byte-identical (`test_show_*_when_state_corrupt_despite_artifact`, `test_show_all_kinds_fail_closed_before_artifact_output`, `test_show_healthy_sessions_unchanged`). Pre-fix stash-verify: all three corrupt-artifact tests fail on RC2 code (exit 0 + body emitted reproduced). Real-console check: both kinds exit 30 cleanly. |
+| B203 / session-id clock was UTC | `new_session_id()` stamped the human-facing `YYYYMMDD-HHMMSS-xxxx` id from UTC; on a non-UTC host the id "showed the wrong clock time" (no timezone suffix → reads like local time). | New injectable `local_now()` (``datetime.now().astimezone()``); `new_session_id(now=None)` stamps **host local wall-clock** fields. Separation of concerns made explicit: id clock = presentation only; `state.created_at` / `updated_at` stay timezone-aware UTC and remain the single ordering authority (`_creation_ordered` untouched); no session renaming/migration; collision handling (fresh random suffix) unchanged. | Controlled-clock regressions (no CI-machine timezone dependency): monkeypatched `local_now` at UTC+9 (12:34:56 local = 03:34:56 UTC) → id prefix `20260102-123456-`; direct `now` injection keeps format/suffix contract; `created_at` stays tz-aware UTC; ordering test where visible id times are swapped relative to `created_at` still resolves newest-first by persisted metadata, and `status --list` agrees. Pre-fix stash-verify: injection tests fail on RC2 code. Real run on a UTC+8 host: id `20260911-110102-1841` matches local clock exactly (UTC would read `03:01:02`). |
+
+### Verification summary
+
+- Deterministic suite: **193 passed, 2 skipped** (~23s) — 181 RC1/RC2 tests
+  plus **12 RC3 regressions** in `tests/unit/test_v01_rc3_regressions.py`.
+  `git diff --check`, `review --help`, `review --version` clean.
+- Regression authenticity: the 12 tests were run against the stashed
+  (pre-fix) source — 9 fail (one per defect direction of B201/B202/B203),
+  3 are preservation guards that pass on both sides by design (CJK
+  readability, healthy `show` behavior, `created_at` ordering).
+- Real smoke (`AGENT_REVIEW_SMOKE=1`): **2 passed** (~143s) against
+  pi 0.85.1 and codex-cli 0.154.0.
+- Real-console sanity (Windows, UTC+8 host, real `review` binary):
+  fresh session id matches local wall clock; `show final` / `show events`
+  on a corrupted session exit 30 with one clean line and no body;
+  `resume` on a corrupted session exits 30 with the sanitized message;
+  `status --list` single-line rows. Windows console guards (rich legacy
+  Win32, UTF-8 stdio) held on all paths; no Errno 22, no native crash.
+
+### RC3 exit-criteria status (spec §6)
+
+1. Every terminal free-text exit summary crosses one shared host-owned
+   presentation safety boundary — **met** (B201).
+2. `review show` cannot emit session artifacts from a corrupt session
+   state — **met** (B202).
+3. New session ids display the host machine's local wall-clock time —
+   **met** (B203).
+4. Persisted timestamps remain authoritative for recency/session
+   resolution — **met** (ordering code untouched; guard test added).
+5. Focused RC3 regressions pass — **met** (12/12).
+6. Full deterministic suite passes with no V0/V0.1 regression — **met**
+   (193/193 non-skipped).
+7. Real Pi/Codex smoke healthy — **met** (2/2).
+8. Audit and lessons documents contain the RC3 remediation record —
+   **met** (this record + V0 lessons §8.6).
+
+**V0.1-RC3 is ready for the final product validation: one real Shopify
+repository workflow.** No new full business E2E was required for these
+local fixes (spec §4); the remaining limitation set below is unchanged.
+
+### Remaining limitations
+
+Unchanged from RC2 (items 1–5 of the RC2 record); N102/N104 remain
+deferred to V0.3, and corrupt sessions are still reported, never
+repaired.
 
 ---
 

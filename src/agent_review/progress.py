@@ -69,16 +69,23 @@ class OutputLevel(str, Enum):
     QUIET = "quiet"
 
 
-def _one_line(text: Any) -> str:
-    """Coerce any value to safe single-line printable text.
+def sanitize_line(text: Any) -> str:
+    """Coerce any value to safe single-line printable terminal text.
 
-    Event payloads occasionally carry externally derived text (agent
-    stderr tails in failure reasons, task titles). Rendering must keep
-    the one-line-per-fact contract: drop control characters and collapse
-    all whitespace runs (newlines/tabs included) to single spaces.
+    This is the ONE host-owned presentation safety boundary for free text
+    on the terminal (V0.1-RC3 B201): both the progress renderer and every
+    CLI final exit summary normalize through this helper, so event-driven
+    output and state-carried output can never obey different rules.
+
+    Event payloads and state fields occasionally carry externally derived
+    text (agent stderr tails in failure reasons, task titles, handoff
+    reasons). Rendering must keep the one-line-per-fact contract: collapse
+    all whitespace runs (newlines/tabs included) to single spaces, then drop
+    any remaining control/non-printable characters (including ANSI escape
+    bytes), keeping words separated. Normal Unicode/CJK text is preserved.
     """
     if isinstance(text, (list, tuple, set)):
-        return " ".join(_one_line(item) for item in text)
+        return " ".join(sanitize_line(item) for item in text)
     if not isinstance(text, str):
         text = str(text)
     # Collapse whitespace (newlines/tabs) to spaces first, then drop any
@@ -96,7 +103,7 @@ def sanitize_title(raw: str | None) -> str:
     single printable line of at most ``MAX_TITLE_LENGTH`` characters.
     Returns "" when nothing presentable remains (placeholder is used).
     """
-    return _one_line(raw or "")[:MAX_TITLE_LENGTH]
+    return sanitize_line(raw or "")[:MAX_TITLE_LENGTH]
 
 
 def display_title(state) -> str:
@@ -246,12 +253,12 @@ class ProgressRenderer:
 
     def _on_session_human_handoff(self, event: dict) -> None:
         self._phase_header_shown = False
-        reason = _one_line(event.get("reason", "task-level boundary reached"))
+        reason = sanitize_line(event.get("reason", "task-level boundary reached"))
         self._write(f"{self._stamp(event)} {SYMBOL_GATE} HUMAN_HANDOFF · {reason}")
 
     def _on_session_failed(self, event: dict) -> None:
         self._phase_header_shown = False
-        reason = _one_line(event.get("reason", "unexpected failure"))
+        reason = sanitize_line(event.get("reason", "unexpected failure"))
         self._write(f"{self._stamp(event)} {SYMBOL_FAIL} FAILED · {reason}")
 
     def _on_session_interrupted(self, event: dict) -> None:
@@ -409,7 +416,7 @@ class ProgressRenderer:
 
     def _on_agent_call_failed(self, event: dict) -> None:
         agent = AGENT_NAMES.get(str(event.get("agent", "")), "Agent")
-        error = _one_line(event.get("error", ""))
+        error = sanitize_line(event.get("error", ""))
         self._write(f"{self._stamp(event)} {SYMBOL_FAIL} {agent} call failed: {error}")
 
     def _on_agent_call_interrupted(self, event: dict) -> None:
@@ -510,7 +517,7 @@ class ProgressRenderer:
         self._write(line)
 
     def _on_task_title_set(self, event: dict) -> None:
-        title = _one_line(event.get("title", ""))
+        title = sanitize_line(event.get("title", ""))
         if title and title != PLACEHOLDER_TITLE:
             self._write(f"         task title: {title}")
 
@@ -543,7 +550,7 @@ class ProgressRenderer:
             for k, v in event.items()
             if k not in ("event", "ts")
         }
-        suffix = " ".join(f"{k}={_one_line(v)}" for k, v in sorted(details.items()))
+        suffix = " ".join(f"{k}={sanitize_line(v)}" for k, v in sorted(details.items()))
         self._write(f"         · {name} {suffix}".rstrip())
 
 
