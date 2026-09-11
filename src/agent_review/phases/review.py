@@ -230,6 +230,15 @@ def _apply_closure_new_issues(o, new_issues: list[Issue]) -> list[Issue]:
     return processed
 
 
+def _remaining_blocker_count(pass_result: PassResult) -> int:
+    """Blockers that still prevent mechanical PASS after a review phase."""
+    return (
+        len(pass_result.open_blocking)
+        + len(pass_result.addressed_blocking)
+        + len(pass_result.need_human)
+    )
+
+
 def run_closure(o) -> ExitCode | None:
     o.state.round += 1
     o.event("CLOSURE_REVIEW_STARTED", round=o.state.round)
@@ -266,15 +275,22 @@ def run_closure(o) -> ExitCode | None:
             issue.resolution = outcome.note or "acceptance criteria not satisfied"
 
     o.store.save_issues(log)
-    ingest_new_issues(
+    ingested = ingest_new_issues(
         o, result.new_issues, provenance="CLOSURE_REVIEW"
     )
+    # Progress truth = post-ingestion, post-lifecycle, post-PASS state:
+    # a closure that resolves every addressed blocker but introduces a new
+    # blocking regression must never render as an unqualified success.
+    pass_result = current_pass(o)
     o.event(
         "CLOSURE_REVIEW_COMPLETED",
         outcomes=len(result.issue_outcomes),
         resolved=resolved_here,
+        new_blocking=sum(
+            1 for i in ingested if i.severity == IssueSeverity.BLOCKING
+        ),
+        remaining=_remaining_blocker_count(pass_result),
     )
-    pass_result = current_pass(o)
     o.event("PASS_COMPUTED", passed=pass_result.passed, reasons=pass_result.reasons)
     if pass_result.passed:
         o.transition(Phase.FINALIZE)
@@ -325,9 +341,17 @@ def run_final(o) -> ExitCode | None:
             o.event("ISSUE_RESOLVED", issue_id=issue.id)
     o.store.save_issues(log)
 
-    o.event("FINAL_REVIEW_COMPLETED", satisfies_requirement=result.satisfies_requirement)
+    # Progress truth: the reviewer verdict alone is never "requirement
+    # satisfied". Emit the orchestrator's combined result (verdict AND
+    # mechanical PASS) so rendering can never overstate workflow state.
     pass_result = current_pass(o)
     passed = result.satisfies_requirement and pass_result.passed
+    o.event(
+        "FINAL_REVIEW_COMPLETED",
+        satisfies_requirement=result.satisfies_requirement,
+        passed=passed,
+        remaining=_remaining_blocker_count(pass_result),
+    )
     o.event("PASS_COMPUTED", passed=passed, reasons=pass_result.reasons)
     if passed:
         o.transition(Phase.FINALIZE)

@@ -135,6 +135,28 @@ def run_with_protocol_repair(
     )
 
 
+# Canonical event-phase vocabulary (audit N103): adapters speak in method
+# names ("initial_review"); the event stream must speak in workflow Phase
+# names so V0.3 aggregation never splits one logical phase into two values.
+CANONICAL_PHASE_NAMES = {
+    "discover": "DISCOVER",
+    "investigate": "INVESTIGATE",
+    "design": "DESIGN",
+    "revise": "REVISION",
+    "ablate": "ABLATION",
+    "initial_review": "INITIAL_REVIEW",
+    "closure_review": "CLOSURE_REVIEW",
+    "final_review": "FINAL_REVIEW",
+    "capability": "CAPABILITY",
+}
+
+
+def canonical_phase(name: str) -> str:
+    """Normalize an adapter method/probe name to the Phase vocabulary."""
+    key = str(name).strip().lower()
+    return CANONICAL_PHASE_NAMES.get(key, str(name).upper() or "UNKNOWN")
+
+
 def protocol_retry_reporter(
     sink: Callable[[str, dict], None] | None,
     agent: str,
@@ -145,7 +167,9 @@ def protocol_retry_reporter(
 
     Maps internal repair states onto the stable V0.1 event names:
     PROTOCOL_RETRY / PROTOCOL_RETRY_SUCCEEDED / PROTOCOL_RETRY_EXHAUSTED.
+    Phase values are canonicalized to the workflow Phase vocabulary.
     """
+    phase = canonical_phase(phase)
 
     def report(name: str, attempt: int) -> None:
         if sink is None:

@@ -190,13 +190,20 @@ RC1（`24eb2b5`）在真实联调中表现良好，但审计发现三类同一�
 
 ### 8.5.1 新经验：呈现层的三条铁律
 
-1. **Agent 文本进入持久化元数据前必须过宿主消毒器**（B001）：task_title 是 agent 自由文本，RC1 直接落盘——探针会话存出 317 字符含 `\n`/`\t` 的标题，直接把 `status --list` 行切裂。修复：`sanitize_title()`（单行、空白折叠、控制符剔除、≤80 字符）在两个入口（DISCOVER、`--name`）统一执行，渲染端 `display_title()` 再消毒一次（防御历史/手改数据）。这与 V0 的 issue 生命周期归一（B001/V0）是同一个模式：**收数据的一方拥有数据形态**。
+> 注：远程 RC1 审计（B101–B103）与本地复核在 RC2 一并解决；本节含两批发现。
+
+0. **随机后缀的 id 会瞬间作废一切“按目录名排序”的代码**（远程 B101）：短 id 引入随机 4hex 后，同秒内字典序完全无时间含义；而 `latest_session` 仍在用目录名排序，且“未完成”只认 RUNNING——更新的 FAILED/INTERRUPTED（可恢复）会被更旧的 RUNNING 挡住。修复：唯一排序策略 = 持久化 `created_at`（损坏会话剔除、id 决定性决胜），未完成 = 状态机 `RESUMABLE_STATUSES`。教训：**改 id 方案时，全仓搜一遍依赖旧 id 性质的代码**（排序、去重、latest）。
+0. **进度渲染不得强于编排器结论**（远程 B102）：closure 行只报 resolved 不报同一评审新引入的阻塞；final 行直接渲染 reviewer 的 satisfies_requirement——用户先看到“requirement satisfied”紧接着 HANDOFF。修复：两个事件改在 ingest+生命周期+机械 PASS 之后发射，携带 `passed`/`new_blocking`/`remaining`；渲染层“requirement satisfied”只能与编排器 PASS 同现。教训：**渲染器消费的应是编排器后处理字段，不是评审员原始字段**——与 V0 的“Codex 不决定 PASS”同源。
+1. **Agent 文本进入持久化元数据前必须过宿主消毒器**（远程 B103 ≡ 本地 B001）：task_title 是 agent 自由文本，RC1 直接落盘——探针会话存出 317 字符含 `\n`/`\t` 的标题，直接把 `status --list` 行切裂。修复：`sanitize_title()`（单行、空白折叠、控制符剔除、≤80 字符）在两个入口（DISCOVER、`--name`）统一执行，渲染端 `display_title()` 再消毒一次（防御历史/手改数据）。这与 V0 的 issue 生命周期归一（B001/V0）是同一个模式：**收数据的一方拥有数据形态**。
 2. **渲染器必须保证“一行一事实”与载荷内容无关**（B002）：`SESSION_FAILED` 的 reason 会内嵌 codex stderr 尾部（含换行），一个事件渲染成三行。修复：`_one_line()` 应用于所有自由文本字段 + verbose 回退 dump。教训：**事件流是结构化的，但字段内容不是**；渲染层的线宽契约不能依赖上游文本干净。
 3. **查我清单的路径要把“坏会话”当一等公民**（B003）：一个 state.json 损坏的会话让 `status`/`status --list`/`show`/`resume` 全部裸异常退出，而代码里那行“(corrupt state)”降级分支其实是死代码——**写了降级路径不等于降级路径可达**，必须用探针验证。修复：`load_state` 对缺失/不可读/非法一律返回 None（fail closed），CLI 层接住 AgentError/ValueError 转干净退出码；`recover_phase` 对非法 checkpoint 依旧硬失败（恢复真相不容含糊）。
 
 ### 8.5.2 新经验：细节
 
-- **ID 碰撞退路不能破坏格式不变量**（N002）：`-2` 后缀让 id 超出 `YYYYMMDD-HHMMSS-xxxx` 契约；改为重掷随机后缀。任何“格式即契约”的标识符，其异常路径也要过同一正则。
+- **Ctrl+C 不计入 agent 失败**（远程 N101）：`agent_call` 捕获 BaseException 时把 KeyboardInterrupt 也发成 AGENT_CALL_FAILED，遥测会把用户取消算成 agent 故障。修复：独立 `AGENT_CALL_INTERRUPTED` 事件（仅 verbose 渲染），终态提示仍由 SESSION_INTERRUPTED 承担。
+- **协议重试事件的 phase 必须走同一词表**（远程 N103）：适配器说方法名（`initial_review`），事件流必须说相位名（`INITIAL_REVIEW`），否则 V0.3 聚合会把一个相位劈成两个值。修复点选在共享的 `protocol_retry_reporter`（真实/假适配器同路）。
+- **任务修订行只说真实发生的事**（远程 N105）：门发生在提案存在之前时，“旧提案已归档 STALE”是流报。事件携带 `archived` 布尔，渲染按事实拼句；真实运行已验证（门后无提案 → 仅 “design basis changed”）。
+- **ID 碰撞退路不能破坏格式不变量**（R203）：`-2` 后缀让 id 超出 `YYYYMMDD-HHMMSS-xxxx` 契约；改为重掷随机后缀。任何“格式即契约”的标识符，其异常路径也要过同一正则。
 - **`step()` 恢复路径重载失败时保留内存态**：`load_state` 变宽松后，恢复路径若拿到 None 会把 `self.state` 置空——改为“重载成功才覆盖”，与旧行为（异常时不赋值）语义对齐。改宽一个 API 时，逐个检查它的全部调用点方向是否变宽/变窄。
 - **自动化真实 E2E 的门答答**：msys 管道对 isatty 撒谎（有时 True），`printf | review resume` 又是真管道（False）→ 门答不可依赖；改用脚本化 UI 驱动 `Orchestrator.resume`（真实适配器 + 真实渲染器，复用 CLI 的 stdio 加固），仅人类按键是常量。这也再次验证了 7.3.3：驱动脚本必须走 CLI 入口/复用其加固。
 - **真实 E2E 再次复现 NEED_HUMAN→交接边界**（R001，FACT 类阻塞 + 门预算 2/2 耗尽）：这是正确行为而非缺陷；N007（reviewer 附带决策选项包）继续挂在 V0.5。
@@ -205,11 +212,14 @@ RC1（`24eb2b5`）在真实联调中表现良好，但审计发现三类同一�
 
 | 项 | 结果 |
 | --- | --- |
-| 确定性测试 | 171 passed（+19 RC2 回归），2 smoke skip |
-| 真实 smoke | 2 passed（pi 0.85.1 / codex 0.154.0，148.5s） |
+| 确定性测试 | 181 passed（+29 RC2 回归），2 smoke skip |
+| 真实 smoke | 2 passed（pi 0.85.1 / codex 0.154.0，≈150s） |
 | 真实 E2E① | 门(3+2 决策)→task_revision 3→设计→初审 2 blocking→NEED_HUMAN→HUMAN_HANDOFF(10)，全程心跳/重试/任务修订可见 |
-| 真实 E2E② | 无 --name：占位符→DISCOVER 语义标题（13 字，非截断）→1 门→DONE(0)，`status --list`/`show events`（RC2 新增）均可辨识会话 |
+| 真实 E2E② | 无 --name：占位符→DISCOVER 语义标题（13 字，非截断）→1 门→DONE(0) |
+| 真实 E2E③（RC2 后） | N105 真实生效（门后无提案不虚报归档）；DONE(0)；默认解析、--list 首行、created_at 三者一致（B101 实证） |
 | Windows 加固 | 两处崩溃修复（rich legacy guard、UTF-8 stdio）在全部新渲染路径下无回归 |
+
+明确移交 V0.3：N102（心跳产生策略与渲染器解耦）、N104（事件流 attempt/commit 语义，聚合前必须解决双计数）。
 
 ---
 

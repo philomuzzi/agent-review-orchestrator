@@ -345,7 +345,7 @@ def test_protocol_retry_event_and_visibility(repo):
     succeeded = [e for e in events if e["event"] == "PROTOCOL_RETRY_SUCCEEDED"]
     assert len(succeeded) == 1
     text = out.getvalue()
-    assert "↻ PROTOCOL RETRY · initial_review" in text
+    assert "↻ PROTOCOL RETRY · INITIAL_REVIEW" in text
     assert "attempt 2" in text
 
 

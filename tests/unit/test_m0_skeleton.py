@@ -68,9 +68,14 @@ def test_m0_gate_question_option_bounds():
 
 
 def test_m0_latest_session_selection(repo):
-    StateStore.create_session(repo, "first request", None)
-    StateStore.create_session(repo, "second request", None)
+    """Latest = newest by persisted created_at (V0.1-RC2 B101 policy).
+
+    The random 4-hex id suffix carries no temporal meaning within one
+    second, so directory-name order must never decide recency.
+    """
+    first = StateStore.create_session(repo, "first request", None)
+    second = StateStore.create_session(repo, "second request", None)
     sessions = StateStore.list_sessions(repo)
     assert len(sessions) == 2
-    latest = StateStore.latest_session(repo)
-    assert latest == sessions[-1]
+    assert StateStore.latest_session(repo, unfinished_only=False) == second.session_id
+    assert first.session_id != second.session_id

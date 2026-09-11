@@ -290,10 +290,12 @@ def apply_gate_answers(o, gate: HumanGate) -> list[Decision]:
 
 def invalidate_design_basis(o, reason: str) -> None:
     """task_revision += 1; old proposal -> history/STALE; open issues stale."""
+    archived = False
     if o.store.load_proposal() is not None:
-        archived = o.store.archive_proposal(reason)
-        if archived is not None:
-            o.event("PROPOSAL_STALE", archived=str(archived), reason=reason)
+        dest = o.store.archive_proposal(reason)
+        if dest is not None:
+            archived = True
+            o.event("PROPOSAL_STALE", archived=str(dest), reason=reason)
     log = o.store.load_issues()
     for issue in log.issues:
         if issue.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED, IssueStatus.NEED_HUMAN):
@@ -302,7 +304,12 @@ def invalidate_design_basis(o, reason: str) -> None:
     o.store.save_issues(log)
     o.state.task_revision += 1
     o.store.save_state(o.state)
-    o.event("TASK_REVISION_INCREMENTED", task_revision=o.state.task_revision, reason=reason)
+    o.event(
+        "TASK_REVISION_INCREMENTED",
+        task_revision=o.state.task_revision,
+        reason=reason,
+        archived=archived,
+    )
 
 
 # ---------------------------------------------------------------------------

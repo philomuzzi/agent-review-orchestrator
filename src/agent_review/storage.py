@@ -24,7 +24,9 @@ from agent_review.models import (
     InvestigationResult,
     IssueLog,
     SessionState,
+    SessionStatus,
 )
+from agent_review.state_machine import RESUMABLE_STATUSES
 
 REVIEW_DIRNAME = ".review"
 
@@ -318,6 +320,31 @@ class StateStore:
         )
 
     @staticmethod
+    def _creation_ordered(repository: Path | str) -> list[tuple]:
+        """(created_at, status, session_id) per loadable session, oldest first.
+
+        Single ordering policy for default resolution and ``status --list``:
+        the persisted ``created_at`` timestamp, never the directory name —
+        the random 4-hex id suffix carries no temporal meaning inside one
+        second. Corrupt sessions (unusable metadata) are excluded from
+        recency decisions. ``created_at`` ties break on the session id so
+        the order stays deterministic.
+        """
+        from datetime import timezone  # noqa: PLC0415
+
+        entries: list[tuple] = []
+        for sid in StateStore.list_sessions(repository):
+            state = StateStore.load_state_of(repository, sid)
+            if state is None:
+                continue
+            created = state.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            entries.append((created, state.status, sid))
+        entries.sort(key=lambda e: (e[0], e[2]))
+        return entries
+
+    @staticmethod
     def load_state_of(repository: Path | str, session_id: str) -> SessionState | None:
         store = StateStore(repository, session_id)
         try:
@@ -329,16 +356,18 @@ class StateStore:
     def latest_session(
         repository: Path | str, unfinished_only: bool = False
     ) -> str | None:
-        from agent_review.models import SessionStatus  # noqa: PLC0415
+        """Newest session by persisted ``created_at``.
 
-        sessions = StateStore.list_sessions(repository)
+        ``unfinished_only`` selects the newest *resumable* session (RUNNING,
+        INTERRUPTED or FAILED — the canonical ``RESUMABLE_STATUSES`` set),
+        so a newer FAILED/INTERRUPTED session is never hidden by an older
+        RUNNING one. Explicit session ids remain authoritative at the CLI
+        layer; this is only the default target.
+        """
+        entries = StateStore._creation_ordered(repository)
+        if not entries:
+            return None
         if not unfinished_only:
-            return sessions[-1] if sessions else None
-        unfinished: list[str] = []
-        for sid in sessions:
-            state = StateStore.load_state_of(repository, sid)
-            if state is None:
-                continue
-            if state.status == SessionStatus.RUNNING:
-                unfinished.append(sid)
-        return unfinished[-1] if unfinished else None
+            return entries[-1][2]
+        resumable = [e for e in entries if e[1] in RESUMABLE_STATUSES]
+        return resumable[-1][2] if resumable else None

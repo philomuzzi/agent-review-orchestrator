@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from typer.testing import CliRunner
 
-from agent_review.agents.fakes import FakeCodexAdapter, FakePiAdapter
+from agent_review.agents.fakes import FakeCodexAdapter, FakePiAdapter, make_blocking_issue
 from agent_review.cli import app, main as cli_main
 from agent_review.config import Config
 from agent_review.models import ExitCode
@@ -307,6 +307,380 @@ def test_load_state_lenient_but_checkpoint_still_strict(repo):
         assert "checkpoint" in str(exc)
     else:  # pragma: no cover - the defect direction would be silence
         raise AssertionError("invalid checkpoint must raise ValueError")
+
+
+# ---------------------------------------------------------------------------
+# V0.1-RC2 audit (remote baseline) regressions: B101 session resolution,
+# B102 review progress truth, N101/N103/N105 event semantics
+# ---------------------------------------------------------------------------
+
+
+def test_same_second_sessions_resolve_by_created_at(repo, monkeypatch):
+    """B101 acceptance 1: random suffixes have no temporal meaning."""
+    import agent_review.storage as storage
+
+    suffixes = iter(["ffff", "0000"])  # lexical order opposes creation order
+    monkeypatch.setattr(
+        storage, "new_session_id", lambda: f"20260911-020202-{next(suffixes)}"
+    )
+    first = storage.StateStore.create_session(repo, "lexically last")
+    second = storage.StateStore.create_session(repo, "created last")
+    assert first.session_id.endswith("ffff")
+    assert second.session_id.endswith("0000")
+    assert storage.StateStore.latest_session(repo, unfinished_only=False) == second.session_id
+
+
+def test_latest_unfinished_includes_failed_and_interrupted(repo):
+    """B101 acceptance 2: newer FAILED/INTERRUPTED sessions are resumable
+    and must not be hidden by an older RUNNING one."""
+    from agent_review.models import Phase, SessionStatus
+
+    running = StateStore.create_session(repo, "older running")
+    failed = StateStore.create_session(repo, "newer failed")
+    state = failed.load_state()
+    state.status = SessionStatus.FAILED
+    state.phase = Phase.FAILED
+    state.resume_phase = Phase.DESIGN
+    failed.save_state(state)
+    assert StateStore.latest_session(repo, unfinished_only=True) == failed.session_id
+
+    interrupted = StateStore.create_session(repo, "newest interrupted")
+    state = interrupted.load_state()
+    state.status = SessionStatus.INTERRUPTED
+    state.phase = Phase.INTERRUPTED
+    state.resume_phase = Phase.DESIGN
+    interrupted.save_state(state)
+    assert StateStore.latest_session(repo, unfinished_only=True) == interrupted.session_id
+
+    # Terminal (DONE) sessions never win the unfinished slot.
+    done = StateStore.create_session(repo, "newest done")
+    state = done.load_state()
+    state.status = SessionStatus.DONE
+    state.phase = Phase.DONE
+    done.save_state(state)
+    assert StateStore.latest_session(repo, unfinished_only=True) == interrupted.session_id
+    assert StateStore.latest_session(repo, unfinished_only=False) == done.session_id
+
+
+def test_resolution_and_list_share_ordering(repo):
+    """B101 acceptance 3: status --list top row == default resolution."""
+    for i in range(3):
+        store = StateStore.create_session(repo, f"session {i}")
+        from agent_review.models import Phase, SessionStatus
+
+        state = store.load_state()
+        state.status = SessionStatus.DONE
+        state.phase = Phase.DONE
+        store.save_state(state)
+    listing = runner.invoke(app, ["status", "--repo", str(repo), "--list"])
+    assert listing.exit_code == 0
+    top_row = next(
+        l for l in listing.output.splitlines() if re.match(r"\d{8}-\d{6}-[0-9a-f]{4}", l)
+    )
+    assert top_row.split()[0] == StateStore.latest_session(repo, unfinished_only=False)
+
+
+def _load_events(store) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (store.dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _rendered(store, out: io.StringIO) -> str:
+    """Replay persisted events through a fresh default renderer."""
+    text = out.getvalue()
+    renderer = ProgressRenderer(level=OutputLevel.DEFAULT, stream=out, heartbeat_interval=0)
+    for event in _load_events(store):
+        renderer.handle(event)
+    return text
+
+
+def test_closure_regression_never_renders_unqualified_success(repo):
+    """B102 closure case: 1 resolved + 1 new blocking regression."""
+    from agent_review.agents.fakes import make_blocking_issue
+    from agent_review.models import IssueCategory
+
+    regression = make_blocking_issue(9, title="regression introduced by fix")
+    regression.category = IssueCategory.REGRESSION
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [
+                json.dumps(
+                    {
+                        "issue_outcomes": [
+                            {"issue_id": "R001", "resolution": "RESOLVED", "note": "ok"}
+                        ],
+                        "new_issues": [regression.model_dump()],
+                        "summary": "fixed but regressed",
+                    }
+                )
+            ],
+        }
+    )
+    out = io.StringIO()
+    renderer = ProgressRenderer(stream=out, heartbeat_interval=0)
+    o = Orchestrator.create(
+        repository=repo,
+        request="closure regression probe",
+        config=Config(),
+        pi=FakePiAdapter(),
+        codex=codex,
+        ui=NonInteractiveUI(),
+        renderer=renderer,
+    )
+    assert o.run() == int(ExitCode.DONE)  # ablation -> final review closes it
+    events = _load_events(o.store)
+    closure = next(e for e in events if e["event"] == "CLOSURE_REVIEW_COMPLETED")
+    assert closure["resolved"] == 1 and closure["new_blocking"] == 1
+    assert closure["remaining"] >= 1
+    text = _rendered(o.store, out)
+    closure_lines = [l for l in text.splitlines() if "CLOSURE_REVIEW" in l and "✓" in l]
+    assert closure_lines, "expected a closure completion line"
+    assert "new blocker(s)" in closure_lines[0]
+    assert "unresolved" in closure_lines[0]
+    # The unqualified success wording must not appear alongside a regression.
+    assert "blocker(s) verified resolved" not in closure_lines[0]
+
+
+def test_closure_all_resolved_keeps_success_wording(repo):
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [
+                json.dumps(
+                    {
+                        "issue_outcomes": [
+                            {"issue_id": "R001", "resolution": "RESOLVED", "note": "ok"}
+                        ],
+                        "new_issues": [],
+                        "summary": "verified",
+                    }
+                )
+            ],
+        }
+    )
+    out = io.StringIO()
+    renderer = ProgressRenderer(stream=out, heartbeat_interval=0)
+    o = Orchestrator.create(
+        repository=repo,
+        request="closure clean probe",
+        config=Config(),
+        pi=FakePiAdapter(),
+        codex=codex,
+        ui=NonInteractiveUI(),
+        renderer=renderer,
+    )
+    assert o.run() == int(ExitCode.DONE)
+    text = _rendered(o.store, out)
+    assert "1 of 1 blocker(s) verified resolved" in text
+
+
+def test_final_review_verdict_never_overstates_pass(repo):
+    """B102 final case: reviewer says satisfied, mechanical PASS disagrees."""
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [
+                json.dumps(
+                    {
+                        "issue_outcomes": [
+                            {"issue_id": "R001", "resolution": "UNRESOLVED", "note": "no"}
+                        ],
+                        "new_issues": [],
+                        "summary": "not verified",
+                    }
+                )
+            ],
+            "final_review": [
+                json.dumps(
+                    {
+                        "satisfies_requirement": True,
+                        "unresolved_issue_ids": ["R001"],
+                        "issues": [],
+                        "summary": "reviewer likes it",
+                    }
+                )
+            ],
+        }
+    )
+    out = io.StringIO()
+    renderer = ProgressRenderer(stream=out, heartbeat_interval=0)
+    o = Orchestrator.create(
+        repository=repo,
+        request="final disagreement probe",
+        config=Config(),
+        pi=FakePiAdapter(),
+        codex=codex,
+        ui=NonInteractiveUI(),
+        renderer=renderer,
+    )
+    assert o.run() == int(ExitCode.HUMAN_HANDOFF)  # open blocker -> ablation -> final -> fail
+    events = _load_events(o.store)
+    final = next(e for e in events if e["event"] == "FINAL_REVIEW_COMPLETED")
+    assert final["satisfies_requirement"] is True
+    assert final["passed"] is False
+    assert final["remaining"] >= 1
+    text = _rendered(o.store, out)
+    final_lines = [l for l in text.splitlines() if "FINAL_REVIEW" in l and ("✓" in l or "!" in l)]
+    assert final_lines
+    assert "requirement satisfied" not in final_lines[0]
+    assert "not passed" in final_lines[0]
+    assert "unresolved" in final_lines[0]
+
+
+def test_final_review_pass_renders_satisfied(repo):
+    """Genuine pass at FINAL_REVIEW (after ablation) renders satisfied+PASS."""
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [
+                json.dumps(
+                    {
+                        "issue_outcomes": [
+                            {"issue_id": "R001", "resolution": "UNRESOLVED", "note": "no"}
+                        ],
+                        "new_issues": [],
+                        "summary": "not verified",
+                    }
+                )
+            ],
+            # final_review defaults: satisfies=True, unresolved=[] -> the
+            # ablation-addressed blocker is verified -> mechanical PASS.
+        }
+    )
+    out = io.StringIO()
+    renderer = ProgressRenderer(stream=out, heartbeat_interval=0)
+    o = Orchestrator.create(
+        repository=repo,
+        request="clean pass probe",
+        config=Config(),
+        pi=FakePiAdapter(),
+        codex=codex,
+        ui=NonInteractiveUI(),
+        renderer=renderer,
+    )
+    assert o.run() == int(ExitCode.DONE)
+    text = _rendered(o.store, out)
+    assert "requirement satisfied · PASS" in text
+
+
+def test_keyboard_interrupt_not_counted_as_agent_failure(repo):
+    """N101: Ctrl+C emits AGENT_CALL_INTERRUPTED, never AGENT_CALL_FAILED."""
+
+    class InterruptingPi(FakePiAdapter):
+        def discover(self, state):
+            raise KeyboardInterrupt
+
+    o = Orchestrator.create(
+        repository=repo,
+        request="interrupt classification probe",
+        config=Config(),
+        pi=InterruptingPi(),
+        codex=FakeCodexAdapter(),
+        ui=NonInteractiveUI(),
+    )
+    assert o.run() == int(ExitCode.INTERRUPTED)
+    names = [e["event"] for e in _load_events(o.store)]
+    assert "AGENT_CALL_INTERRUPTED" in names
+    assert "AGENT_CALL_FAILED" not in names
+    assert "SESSION_INTERRUPTED" in names
+
+
+def test_protocol_retry_events_use_canonical_phase(repo):
+    """N103: adapter method names never leak as event phase values."""
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": ["not json"],
+            "initial_review:repair": [json.dumps({"issues": [], "summary": "ok"})],
+        }
+    )
+    o = Orchestrator.create(
+        repository=repo,
+        request="canonical phase probe",
+        config=Config(),
+        pi=FakePiAdapter(),
+        codex=codex,
+        ui=NonInteractiveUI(),
+    )
+    assert o.run() == int(ExitCode.DONE)
+    retries = [e for e in _load_events(o.store) if e["event"].startswith("PROTOCOL_")]
+    assert retries
+    assert all(e.get("phase", "").isupper() for e in retries)
+    assert any(e["phase"] == "INITIAL_REVIEW" for e in retries)
+
+
+class AnsweringUI(NonInteractiveUI):
+    def __init__(self, answers):
+        self.answers = list(answers)
+
+    def is_interactive(self) -> bool:
+        return True
+
+    def ask(self, prompt: str) -> str:
+        return self.answers.pop(0) if self.answers else ""
+
+
+def test_task_revision_message_only_claims_real_archives(repo):
+    """N105: gate before any proposal -> no STALE archive claim."""
+    pi = FakePiAdapter(
+        script={
+            "discover": [
+                json.dumps(
+                    {
+                        "task_title": "门后无提案",
+                        "task_kind": "CHANGE",
+                        "current_state": "s",
+                        "relevant_components": ["src/"],
+                        "existing_constraints": [],
+                        "change_surface": [],
+                        "unknowns": [],
+                        "human_candidates": [
+                            {
+                                "category": "TRADE_OFF",
+                                "question": "策略 A 还是 B？",
+                                "why": "",
+                                "options": [
+                                    {"key": "a", "label": "A", "impact": "x"},
+                                    {"key": "b", "label": "B", "impact": "y"},
+                                ],
+                                "recommendation": "a",
+                                "source": "DISCOVER",
+                            }
+                        ],
+                    }
+                )
+            ]
+        }
+    )
+    out = io.StringIO()
+    renderer = ProgressRenderer(stream=out, heartbeat_interval=0)
+    o = Orchestrator.create(
+        repository=repo,
+        request="revision before proposal probe",
+        config=Config(),
+        pi=pi,
+        codex=FakeCodexAdapter(),
+        ui=AnsweringUI(["1"]),
+        renderer=renderer,
+    )
+    assert o.run() == int(ExitCode.DONE)
+    revisions = [e for e in _load_events(o.store) if e["event"] == "TASK_REVISION_INCREMENTED"]
+    assert revisions and revisions[0]["archived"] is False
+    text = _rendered(o.store, out)
+    revision_lines = [l for l in text.splitlines() if "task revision" in l]
+    assert revision_lines
+    assert "archived STALE" not in revision_lines[0]
+
 
 
 # ---------------------------------------------------------------------------

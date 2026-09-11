@@ -318,17 +318,41 @@ class ProgressRenderer:
         self._phase_header_shown = False
         resolved = event.get("resolved")
         outcomes = event.get("outcomes", 0)
-        if resolved is not None:
+        new_blocking = int(event.get("new_blocking", 0))
+        remaining = event.get("remaining")
+        if resolved is not None and new_blocking == 0 and remaining == 0:
             summary = f"{resolved} of {outcomes} blocker(s) verified resolved"
         else:
-            summary = f"{outcomes} blocker(s) verified"
+            # Post-PASS truth: include new blockers and unresolved ones so a
+            # closure that verifies everything but introduces a regression
+            # never renders as an unqualified success.
+            parts = [f"{resolved if resolved is not None else 0} of {outcomes} verified"]
+            if new_blocking:
+                parts.append(f"{new_blocking} new blocker(s)")
+            if remaining:
+                parts.append(f"{remaining} blocker(s) unresolved")
+            summary = " · ".join(parts)
         self._phase_line(event, "CLOSURE_REVIEW", SYMBOL_DONE, summary)
 
     def _on_final_review_completed(self, event: dict) -> None:
         self._phase_header_shown = False
-        ok = bool(event.get("satisfies_requirement", False))
-        verdict = "requirement satisfied" if ok else "requirement NOT satisfied"
-        self._phase_line(event, "FINAL_REVIEW", SYMBOL_DONE, verdict)
+        # Workflow truth, not the reviewer verdict: PASS requires the
+        # mechanical rule too, so "requirement satisfied" can only appear
+        # when the orchestrator has actually computed a pass.
+        passed = event.get("passed")
+        remaining = event.get("remaining")
+        if passed:
+            summary = "requirement satisfied · PASS"
+        else:
+            summary = "requirement check not passed"
+            if remaining:
+                summary += f" · {remaining} blocker(s) unresolved"
+        if self._verbose() and event.get("satisfies_requirement") is not None:
+            summary += (
+                f" · reviewer verdict: {'satisfied' if event['satisfies_requirement'] else 'not satisfied'}"
+            )
+        symbol = SYMBOL_DONE if passed else SYMBOL_GATE
+        self._phase_line(event, "FINAL_REVIEW", symbol, summary)
 
     def _on_final_md_written(self, event: dict) -> None:
         self._phase_header_shown = False
@@ -387,6 +411,17 @@ class ProgressRenderer:
         agent = AGENT_NAMES.get(str(event.get("agent", "")), "Agent")
         error = _one_line(event.get("error", ""))
         self._write(f"{self._stamp(event)} {SYMBOL_FAIL} {agent} call failed: {error}")
+
+    def _on_agent_call_interrupted(self, event: dict) -> None:
+        # User cancellation is not an agent failure (N101); the terminal
+        # SESSION_INTERRUPTED line carries the user-facing notice.
+        if not self._verbose():
+            return
+        agent = AGENT_NAMES.get(str(event.get("agent", "")), "Agent")
+        self._write(
+            f"         {agent} call interrupted by user after "
+            f"{event.get('seconds', 0)}s"
+        )
 
     # -- issues / retry / gates ---------------------------------------------------------
 
@@ -464,10 +499,15 @@ class ProgressRenderer:
 
     def _on_task_revision_incremented(self, event: dict) -> None:
         revision = event.get("task_revision", "")
-        self._write(
+        line = (
             f"{self._stamp(event)} {SYMBOL_RETRY} task revision {revision} · "
-            "design basis changed, old proposal archived STALE"
+            "design basis changed"
         )
+        # Render only facts that actually happened: the STALE archive notice
+        # appears only when a proposal really was archived (N105).
+        if event.get("archived"):
+            line += " · old proposal archived STALE"
+        self._write(line)
 
     def _on_task_title_set(self, event: dict) -> None:
         title = _one_line(event.get("title", ""))

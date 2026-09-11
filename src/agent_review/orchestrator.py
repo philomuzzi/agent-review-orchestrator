@@ -183,14 +183,26 @@ class Orchestrator:
         except BaseException as exc:
             stop.set()
             thread.join(timeout=2.0)
-            self.event(
-                "AGENT_CALL_FAILED",
-                phase=phase,
-                agent=agent,
-                action=action,
-                error=type(exc).__name__,
-                seconds=round(time.monotonic() - started, 1),
-            )
+            if isinstance(exc, KeyboardInterrupt):
+                # User cancellation is not an agent failure (audit N101):
+                # classify it separately so telemetry never counts Ctrl+C
+                # as an agent-call failure.
+                self.event(
+                    "AGENT_CALL_INTERRUPTED",
+                    phase=phase,
+                    agent=agent,
+                    action=action,
+                    seconds=round(time.monotonic() - started, 1),
+                )
+            else:
+                self.event(
+                    "AGENT_CALL_FAILED",
+                    phase=phase,
+                    agent=agent,
+                    action=action,
+                    error=type(exc).__name__,
+                    seconds=round(time.monotonic() - started, 1),
+                )
             raise
         stop.set()
         thread.join(timeout=2.0)
