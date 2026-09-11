@@ -35,6 +35,135 @@ def normalize_answer_text(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Human Answer Alias Space (V0.2-RC3 B301)
+#
+# The CLI answering protocol accepts more than option keys: a Human may
+# answer a Gate question with the option key, the option label, key +
+# label, the numeric index, "选项N" or "option N". Reserved protocol
+# control commands (custom-decision selectors, global recommendation
+# selectors) live in the same input namespace and are recognized BEFORE
+# option matching. The safety invariant is therefore not "option keys
+# are unique" but "every normalized Human input accepted as
+# authoritative has exactly one interpretation".
+#
+# These constants and helpers are the SINGLE source of truth shared by
+# GateQuestion validation (prove the alias space is unambiguous BEFORE
+# a Human is asked) and runtime answer matching (resolve input with the
+# same alias sets). Keeping them in models means validators and the
+# matching code can never drift apart.
+# ---------------------------------------------------------------------------
+
+# Explicit custom-decision mode selectors (V0.2 spec 4.1). Only these
+# RESERVED protocol tokens turn free text into an authoritative Human
+# Decision; unmatched prose never acquires Requirement Authority by
+# itself. Option-owned aliases must not collide with these tokens.
+CUSTOM_REQUEST_ANSWERS = frozenset(
+    {
+        "0",
+        "custom",
+        "自定义",
+        "自定义决策",
+        "自己定义",
+        "自己决定",
+    }
+)
+
+# Global recommendation selectors: apply every question's recommended
+# option in one answer. Option-owned aliases must not collide with
+# these tokens either.
+GLOBAL_RECOMMEND_ANSWERS = frozenset(
+    {
+        "都按推荐",
+        "按推荐",
+        "全部按推荐",
+        "all recommended",
+    }
+)
+
+
+def normalized_custom_selector_aliases() -> frozenset[str]:
+    """Custom-decision selectors after the answer normalization."""
+    return frozenset(normalize_answer_text(a) for a in CUSTOM_REQUEST_ANSWERS)
+
+
+def normalized_global_recommend_aliases() -> frozenset[str]:
+    """Global recommendation selectors after the answer normalization."""
+    return frozenset(normalize_answer_text(a) for a in GLOBAL_RECOMMEND_ANSWERS)
+
+
+def normalized_protocol_control_aliases() -> frozenset[str]:
+    """The full reserved protocol-control namespace, normalized (RC3 B301 §2.5).
+
+    CUSTOM_REQUEST_ANSWERS ∪ GLOBAL_RECOMMEND_ANSWERS through the same
+    ``normalize_answer_text`` used for option aliases and runtime answer
+    matching. The numeric custom selector ``0`` is included through the
+    custom-control set.
+    """
+    return normalized_custom_selector_aliases() | normalized_global_recommend_aliases()
+
+
+def normalized_option_aliases(option, index: int) -> tuple[str, ...]:
+    """Every normalized answer form the CLI accepts for one option.
+
+    For the option at 1-based ``index`` the answering protocol accepts:
+    the option key; the option label; ``key + " " + label``; the numeric
+    index; ``"选项" + index``; ``"option " + index`` — each passed through
+    ``normalize_answer_text`` exactly like runtime answer matching
+    (RC3 B301 §2.5). Fixed order so violation reporting is deterministic.
+    Aliases of the SAME option may normalize to the same string; aliases
+    of DIFFERENT options must never intersect.
+    """
+    return (
+        normalize_answer_text(option.key),
+        normalize_answer_text(option.label),
+        normalize_answer_text(f"{option.key} {option.label}"),
+        normalize_answer_text(str(index)),
+        normalize_answer_text(f"选项{index}"),
+        normalize_answer_text(f"option {index}"),
+    )
+
+
+def option_alias_violation(options) -> str | None:
+    """Deterministic Human Answer Alias Space check (RC3 B301 §2.5).
+
+    Returns None when every alias is unambiguous; otherwise a
+    deterministic error string for the FIRST violation in option order.
+    Two rules are enforced:
+
+    1. no alias of one option may intersect the alias set of another
+       option (a Human answer must have exactly one interpretation);
+    2. no option-owned alias may intersect the reserved protocol-control
+       namespace (custom-decision / global recommendation selectors) —
+       a displayed option must be safely selectable through every
+       advertised answer form.
+
+    Used by the shared GateQuestion model boundary, intake candidate
+    suppression, and convergence packet validation — one rule, three
+    enforcement points. Never auto-renames or reorders options.
+    """
+    control = normalized_protocol_control_aliases()
+    owner: dict[str, int] = {}  # normalized alias -> 1-based option index
+    for index, option in enumerate(options, 1):
+        for alias in normalized_option_aliases(option, index):
+            if alias in control:
+                return (
+                    f"option {index} answer alias {alias!r} collides with a "
+                    "reserved protocol control command (custom/recommendation "
+                    "selector); a displayed option must be safely selectable "
+                    "through every advertised answer form"
+                )
+            prior_index = owner.get(alias)
+            if prior_index is not None and prior_index != index:
+                return (
+                    f"answer alias {alias!r} matches both option {prior_index} "
+                    f"and option {index}; every normalized Human answer must "
+                    "have exactly one interpretation"
+                )
+            owner[alias] = index
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -492,6 +621,19 @@ class GateQuestion(BaseModel):
                     f"keys after normalization: {option.key!r}"
                 )
             seen.add(normalized)
+        # Full Human Answer Alias Space (V0.2-RC3 B301 §2.5/§2.8): the
+        # CLI accepts key / label / key+label / numeric index / 选项N /
+        # option N, and reserves control commands in the same namespace.
+        # Every alias must have exactly one interpretation; validation
+        # uses the SAME helper as runtime answer matching so the two can
+        # never drift apart. Enforced here at the shared model boundary
+        # so normal Intake gates, Problem Mode FACT gates, convergence
+        # gates and future gate producers all inherit the invariant.
+        violation = option_alias_violation(self.options)
+        if violation is not None:
+            raise ValueError(
+                f"GateQuestion '{self.decision_key}': {violation}"
+            )
         if self.recommendation is not None:
             keys = {o.key for o in self.options}
             if self.recommendation not in keys:

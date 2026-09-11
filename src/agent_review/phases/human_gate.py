@@ -25,7 +25,9 @@ from agent_review.models import (
     AnswerValidation,
     AnswerType,
     AuthorityOutcome,
+    CUSTOM_REQUEST_ANSWERS,
     DECISION_SEMANTIC_CATEGORIES,
+    GLOBAL_RECOMMEND_ANSWERS,
     Decision,
     DecisionCandidate,
     DecisionSource,
@@ -44,6 +46,10 @@ from agent_review.models import (
     SessionStatus,
     TaskKind,
     normalize_answer_text,
+    normalized_custom_selector_aliases,
+    normalized_global_recommend_aliases,
+    normalized_option_aliases,
+    option_alias_violation,
 )
 
 # Human decision semantic categories for BOTH intake candidates and
@@ -53,21 +59,12 @@ DECISION_CATEGORIES = set(DECISION_SEMANTIC_CATEGORIES)
 MAX_QUESTIONS_PER_GATE = 3
 MAX_ANSWER_PASSES = 2  # bounded re-ask rounds before waiting again
 
-GLOBAL_RECOMMEND_ANSWERS = {"都按推荐", "按推荐", "全部按推荐", "all recommended"}
-
-# Explicit custom-decision mode selectors (V0.2 spec 4.1). Only these
-# RESERVED protocol tokens turn free text into an authoritative Human
-# Decision; unmatched prose never acquires Requirement Authority by
-# itself. Option keys must not collide with these tokens (validated
-# in candidate filtering and convergence packet validation).
-CUSTOM_REQUEST_ANSWERS = {
-    "0",
-    "custom",
-    "自定义",
-    "自定义决策",
-    "自己定义",
-    "自己决定",
-}
+# Protocol control commands (V0.2-RC3 B301): defined once in models as
+# part of the Human Answer Alias Space and re-exported here for
+# compatibility. The SAME constants + normalization drive Gate
+# validation, candidate/packet rejection, and runtime matching.
+_GLOBAL_RECOMMEND_ALIASES = normalized_global_recommend_aliases()
+_CUSTOM_SELECTOR_ALIASES = normalized_custom_selector_aliases()
 
 CUSTOM_DECISION_PROMPT = (
     "Enter your decision (this becomes an authoritative session decision): "
@@ -99,7 +96,8 @@ def eligible_candidates(
 
     Returns (eligible, suppressed). Suppression rules (spec 14):
     categories outside the allowed set (naming/taste/extensibility are not
-    categories at all), and questions without 2+ meaningful options.
+    categories at all), questions whose option count is outside 2-4
+    (N301) or whose Human Answer Alias Space is ambiguous (B301).
     Already-decided questions are session facts and are skipped silently.
     """
     decisions = o.store.load_decisions().decisions
@@ -110,50 +108,42 @@ def eligible_candidates(
     }
     eligible: list[HumanCandidate] = []
     suppressed: list[HumanCandidate] = []
-    reserved = {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}
+    reserved = normalized_custom_selector_aliases()
     for candidate in candidates:
         key = candidate_key_of(candidate)
         if candidate.category not in DECISION_CATEGORIES:
-            suppressed.append(candidate)
-            o.event(
-                "HUMAN_CANDIDATE_SUPPRESSED",
-                decision_key=key,
-                reason=(
-                    f"category not a Human decision semantic "
-                    f"(REQUIREMENT/FACT/TRADE_OFF/SCOPE): {candidate.category}"
-                ),
+            reason = (
+                f"category not a Human decision semantic "
+                f"(REQUIREMENT/FACT/TRADE_OFF/SCOPE): {candidate.category}"
             )
-        elif len(candidate.options) < 2:
-            suppressed.append(candidate)
-            o.event(
-                "HUMAN_CANDIDATE_SUPPRESSED",
-                decision_key=key,
-                reason="fewer than 2 meaningful options",
+        elif not (2 <= len(candidate.options) <= 4):
+            # N301 (V0.2-RC3): normal Intake enforces the SAME 2-4
+            # option cardinality as convergence packets. >4 options is
+            # suppressed — never silently truncated to four, which would
+            # make the Agent-visible packet differ from the
+            # Human-visible one and could orphan a recommendation.
+            reason = (
+                f"requires 2-4 meaningful options, got {len(candidate.options)}"
             )
         elif any(not op.key.strip() or not op.label.strip() for op in candidate.options):
-            suppressed.append(candidate)
-            o.event(
-                "HUMAN_CANDIDATE_SUPPRESSED",
-                decision_key=key,
-                reason="option keys and labels must be non-empty",
-            )
+            reason = "option keys and labels must be non-empty"
         elif any(_norm(op.key) in reserved for op in candidate.options):
-            suppressed.append(candidate)
-            o.event(
-                "HUMAN_CANDIDATE_SUPPRESSED",
-                decision_key=key,
-                reason="option key collides with the reserved custom-decision selector",
-            )
+            reason = "option key collides with the reserved custom-decision selector"
         elif len({_norm(op.key) for op in candidate.options}) != len(candidate.options):
             # Same invariant as the GateQuestion model boundary
             # (V0.2-RC2 B203.2): options indistinguishable by answer
             # matching must never reach a Human.
+            reason = "duplicate option keys after normalization"
+        else:
+            # B301 (V0.2-RC3): reject the full Human Answer Alias Space
+            # ambiguity — duplicate labels, key/label/composite
+            # collisions, numeric/选项N collisions and protocol-control
+            # collisions — with the shared deterministic reason. No Gate
+            # is created and no Human interruption is consumed.
+            reason = option_alias_violation(candidate.options)
+        if reason is not None:
             suppressed.append(candidate)
-            o.event(
-                "HUMAN_CANDIDATE_SUPPRESSED",
-                decision_key=key,
-                reason="duplicate option keys after normalization",
-            )
+            o.event("HUMAN_CANDIDATE_SUPPRESSED", decision_key=key, reason=reason)
         elif key in decided:
             # Human answer is session fact; never re-ask unless superseded.
             continue
@@ -163,9 +153,12 @@ def eligible_candidates(
 
 
 def _to_question(candidate: HumanCandidate) -> GateQuestion:
+    # N301 (V0.2-RC3): consume the ALREADY VALIDATED option list —
+    # eligible_candidates enforced 2-4 options, so there is nothing to
+    # truncate and invalid cardinality can no longer be hidden by slicing.
     options = [
         GateOption(key=o.key, label=o.label, impact=o.impact)
-        for o in candidate.options[:4]
+        for o in candidate.options
     ]
     return GateQuestion(
         decision_key=candidate_key_of(candidate),
@@ -276,26 +269,38 @@ def _norm(text: str) -> str:
 
 
 def match_option(question: GateQuestion, raw: str) -> GateOption | None:
-    """Normalize a natural-language answer onto one option, or None."""
+    """Normalize a Human answer onto exactly one option, or None.
+
+    Resolution uses the SAME ``normalized_option_aliases`` sets as
+    GateQuestion validation (RC3 B301 §2.6 single source of truth):
+    option key, option label, key + label, numeric index, 选项N and
+    "option N", all through ``normalize_answer_text``.
+
+    Defense in depth (RC3 B301 §2.7): a valid GateQuestion makes
+    ambiguous matches impossible, but runtime matching must not rely
+    on first-match-wins for malformed/corrupt historical artifacts or
+    future validator regressions::
+
+        0 matches   -> unmatched (stays unresolved)
+        1 match     -> that option
+        >1 matches  -> protocol ambiguity; fail closed (None)
+
+    An ambiguity therefore never silently becomes an ACTIVE Decision.
+    """
     normalized = _norm(raw)
     if not normalized:
         return None
+    matches: list[GateOption] = []
     for index, option in enumerate(question.options, 1):
-        keys = {
-            _norm(option.key),
-            _norm(option.label),
-            _norm(f"{option.key} {option.label}"),
-            str(index),
-            _norm(f"选项{index}"),
-            _norm(f"option {index}"),
-        }
-        if normalized in keys:
-            return option
+        if normalized in normalized_option_aliases(option, index):
+            matches.append(option)
+    if len(matches) == 1:
+        return matches[0]
     return None
 
 
 def is_global_recommend(raw: str) -> bool:
-    return _norm(raw) in {_norm(a) for a in GLOBAL_RECOMMEND_ANSWERS}
+    return _norm(raw) in _GLOBAL_RECOMMEND_ALIASES
 
 
 def is_custom_request(raw: str) -> bool:
@@ -304,7 +309,7 @@ def is_custom_request(raw: str) -> bool:
     Any other unmatched free text stays an unresolved attempt; it never
     silently becomes an authoritative CUSTOM decision.
     """
-    return _norm(raw) in CUSTOM_REQUEST_ANSWERS
+    return _norm(raw) in _CUSTOM_SELECTOR_ALIASES
 
 
 def normalize_answer(question: GateQuestion, raw: str) -> GateAnswer:
@@ -590,7 +595,7 @@ def _validate_candidate_packet(
             f"decision candidate for issue(s) {candidate.source_issue_ids or [outcome_issue_id]} "
             f"requires 2-4 options, got {len(candidate.options)}"
         )
-    reserved = {_norm(a) for a in CUSTOM_REQUEST_ANSWERS}
+    reserved = normalized_custom_selector_aliases()
     seen_keys: set[str] = set()
     for option in candidate.options:
         if not option.key.strip() or not option.label.strip():
@@ -610,6 +615,18 @@ def _validate_candidate_packet(
                 f"duplicate option keys after normalization: {option.key!r}"
             )
         seen_keys.add(normalized)
+    # B301 (V0.2-RC3): the complete Human Answer Alias Space must be
+    # unambiguous — labels, composite key+label forms, numeric/选项N
+    # aliases and the reserved protocol-control commands share one
+    # namespace with option keys. Same shared helper as GateQuestion
+    # validation and runtime matching.
+    alias_violation = option_alias_violation(candidate.options)
+    if alias_violation is not None:
+        return (
+            f"decision candidate for issue(s) "
+            f"{candidate.source_issue_ids or [outcome_issue_id]}: "
+            f"{alias_violation}"
+        )
     if candidate.recommendation is not None:
         keys = {option.key for option in candidate.options}
         if candidate.recommendation not in keys:
@@ -830,9 +847,11 @@ def resolve_need_human_issues(
                 category=candidate.category,
                 question=candidate.question,
                 why_human=candidate.why_human,
+                # N301: options already validated to exactly 2-4 — no
+                # slicing that could hide invalid cardinality.
                 options=[
                     GateOption(key=op.key, label=op.label, impact=op.impact)
-                    for op in candidate.options[:4]
+                    for op in candidate.options
                 ],
                 recommendation=candidate.recommendation,
             )

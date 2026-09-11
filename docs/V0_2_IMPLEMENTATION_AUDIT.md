@@ -1,6 +1,6 @@
 # Agent Review Orchestrator V0.2 Implementation Audit
 
-**Status:** V0.2-RC2 — implemented; deterministic suite green (255 + 2 skip); real Pi/Codex smoke green; RC2 real-agent validation recorded in §6.4
+**Status:** V0.2-RC3 — implemented; B301/N301 closed (`docs/V0_2_RC3_FIX_SPEC.md`); deterministic suite green (293 + 2 skip, incl. 38 RC3 regressions); real Pi/Codex smoke green; RC3 real-agent supplemental evidence recorded in §7.6 within the mandatory validation budget
 **Audit type:** Implementation summary + verification record
 **Implemented against:** `docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md` + `docs/V0_2_RC2_FIX_SPEC.md`
 **Baseline:** V0.1-RC3 (`b93f2f0`); RC1 remediation baseline `f5038c1`
@@ -192,3 +192,156 @@ Environment: pi 0.85.1 (RPC, read-only allowlist), codex-cli 0.154.0 (`exec -s r
 3. Forcing the *downstream* Problem-Mode FACT vacuum on real agents proved impractical within RC2's timebox: intake gates legitimately absorb fact-shaped candidates whenever the request reveals the vacuum, and request wording that hides it tends to produce clean-passing designs (six documented attempts). Deterministic coverage (B202-A/B/C + mixed rule) is complete; the next real Shopify problem-mode workflow is expected to exercise this path naturally, and V0.3 telemetry should count convergence-gate resume semantics.
 4. Reviewer category choice (REQUIREMENT vs DESIGN) remains the probabilistic layer the spec assigns to Codex; RC2 guarantees the *routing* is correct for whichever category the reviewer uses — never more, never less.
 5. Agent-side long-output truncation (`revise`/`ablate`) recurred on RC2 real runs (3 occurrences, 3 recoveries via the documented FAILED→resume path). Agent-side, not orchestrator-side; stance unchanged.
+
+---
+
+## 7. V0.2-RC3 remediation record (B301 + N301)
+
+**Remediation spec:** `docs/V0_2_RC3_FIX_SPEC.md` · **RC2 baseline:** `11bf2ef` (spec baseline `92c7dfd`)
+Independent post-RC2 review found one remaining Human Authority blocker (B301 —
+Human Answer Alias Space ambiguity) and one protocol-hardening item (N301 —
+Intake option cardinality). Both are closed here. No V0.3+ scope was touched.
+
+### 7.1 B301 — Human Answer Alias Space is mechanically unambiguous
+
+**Root cause.** RC2 proved uniqueness only for normalized *option keys*, but the
+CLI answering protocol accepts six forms per option — key, label, `key + label`,
+numeric index, `选项N`, `option N` — plus reserved protocol-control commands
+(custom selectors, global-recommend selectors) in the same Human input
+namespace. A packet with duplicate labels, a key colliding with another
+option's numeric selector, or a label colliding with `custom`/`按推荐` was
+structurally valid, and `match_option()` resolved it **first-match-wins** —
+silently recording one of two possible Human meanings as an ACTIVE Decision.
+
+**Fix — one shared source of truth (fix-spec §2.5–§2.7).** `models.py` now owns
+the complete alias space:
+
+| Helper | Role |
+| --- | --- |
+| `CUSTOM_REQUEST_ANSWERS` / `GLOBAL_RECOMMEND_ANSWERS` | the reserved protocol-control commands, moved from `phases/human_gate.py` into models (single definition; re-exported for compatibility) |
+| `normalized_option_aliases(option, index)` | the six normalized answer forms each option owns (fixed order ⇒ deterministic violations) |
+| `normalized_protocol_control_aliases()` | CUSTOM ∪ GLOBAL_RECOMMEND through the same `normalize_answer_text` |
+| `option_alias_violation(options)` | the invariant: aliases of different options must never intersect, and no option-owned alias may intersect the protocol-control namespace; returns a deterministic reason string |
+
+One rule, three enforcement points, all fed by the same helpers:
+
+1. **Shared model boundary** — `GateQuestion` validates the alias space after
+   key uniqueness and before recommendation membership, so normal Intake gates,
+   Problem Mode FACT gates, Convergence gates and any future producer inherit
+   the invariant. No auto-rename, no silent discard, no reordering.
+2. **Intake candidate suppression** — `eligible_candidates` rejects ambiguous
+   candidates with the shared deterministic reason via `HUMAN_CANDIDATE_SUPPRESSED`
+   (no Gate, no interruption consumed).
+3. **Convergence packet validation** — `_validate_candidate_packet` runs the
+   same check before gate creation/budget consumption; invalid packets fail
+   closed to structured `HUMAN_HANDOFF` with provenance intact.
+
+**Runtime matching.** `match_option()` now resolves input against the same
+`normalized_option_aliases` sets and **fails closed on ambiguity**: 0 matches →
+unresolved; exactly 1 → the option; **>1 → protocol ambiguity → None** — never
+first-match-wins, so even a corrupt historical artifact or a future validator
+regression cannot silently persist one of multiple Human meanings. `is_custom_request`
+/ `is_global_recommend` consume the normalized control sets from the same
+source. Persisted corrupt artifacts are additionally rejected at the
+`GateLog` load boundary (pydantic revalidates nested questions).
+
+### 7.2 N301 — Intake option cardinality is strictly 2–4
+
+- `eligible_candidates` now enforces `2 <= len(options) <= 4` exactly like
+  convergence packets; `>4` is **suppressed**, never truncated, with the
+  deterministic reason `requires 2-4 meaningful options, got N` (auditable in
+  `events.jsonl`; also the new message for <2, which was previously
+  `fewer than 2 meaningful options`).
+- Both `[:4]` slices removed: `_to_question()` (intake) and the convergence
+  `GateQuestion` construction consume the already-validated list, so invalid
+  cardinality can no longer be hidden by slicing and an Agent recommendation
+  can never point at a truncated-away option.
+- Malformed candidates create no Gate and consume no Human interruption
+  (asserted by tests).
+
+### 7.3 Prompt boundary documentation (supporting, not protocol)
+
+`discover.md`, `investigate.md` and `human_authority_check.md` now state the
+tightened mechanical boundary (mutually distinct keys/labels after
+normalization, no answer-shortcut/reserved-command look-alikes, 2–4 options
+rejected-not-truncated) so real agents are not surprised by fail-closed
+rejection. Mechanical validation remains authoritative; prompts are advisory.
+
+### 7.4 RC3 regression suite (new)
+
+`tests/unit/test_v02_rc3_regressions.py` — 38 tests mapping to fix-spec §4
+items 1–23 (preservation items 24–30 are the unchanged existing suites):
+
+| Fix-spec item | Tests |
+| --- | --- |
+| 1–6 cross-option ambiguity (duplicate/normalized labels, key↔label, composite, numeric, `选项N`/`option N`) | `test_b301_item1..6`, `test_b301_intake_duplicate_label…`, `test_b301_intake_numeric_collision…`, `test_b301_convergence_duplicate_label…` |
+| 7–8 protocol-control collisions (custom + recommend selectors, incl. normalization variants like `Custom.` / `All Recommended.`) | `test_b301_item7` (5 params), `test_b301_item8` (5 params), `test_b301_control_collision_only_after_normalization…`, `test_b301_convergence_control_collision…` |
+| 9 same normalization as runtime | `test_b301_item9…`, `test_b301_shared_alias_helpers…`, `test_b301_match_option_uses_the_shared_alias_forms` |
+| 10–16 valid behavior preserved (distinct packet valid; numeric/key/label/key+label answers; custom selectors; global recommend) | `test_b301_item10`, `test_b301_items_11_to_14…`, `test_b301_item15…`, `test_b301_item16…` |
+| 17 defense in depth (no first-match-wins; ambiguity never becomes ACTIVE Decision; corrupt artifact rejected at load) | `test_b301_item17_match_option_fails_closed…`, `test_b301_item17_ambiguous_answer_never_becomes…`, `test_b301_item17_persisted_ambiguous_gate…` |
+| 18–23 N301 cardinality (1 option, 5 options no-truncation, 2 works, 4 works incl. numeric alias 4, no gate/no interruption, deterministic auditable reason) | `test_n301_item18..23`, `test_n301_gate_question_rejects_five_options`, `test_n301_convergence_candidate_with_five_options…` |
+
+**Falsification** (the `V0_LESSONS_LEARNED.md` §8.6.2 “回归必须先证伪” practice): before the fix was applied, a probe
+script against the RC2 source confirmed all five headline defects —
+duplicate-label packet accepted; key `1` colliding with the numeric selector
+accepted; label `custom` accepted; `match_option("保持现状")` silently selected
+the first option; 5 options silently truncated to 4. All are now rejected by
+the RC3 suite.
+
+### 7.5 Verification evidence
+
+- **Focused RC3 suite:** 38 passed.
+- **Full deterministic suite:** 293 passed, 2 skipped (~40s) — RC2 baseline 255
+  + 38 RC3 regressions, **0 regressions** (V0/V0.1/V0.2/RC2 suites, PROD-001
+  permanent replay, gate consistency, session presentation all unchanged).
+- **Real adapter smoke:** `AGENT_REVIEW_SMOKE=1` full suite **295 passed**
+  (~2:43; pi 0.85.1 RPC read-only + codex-cli 0.154.0 `exec -s read-only`
+  probes green).
+
+### 7.6 Real-agent supplemental evidence (within the mandatory budget)
+
+Per fix-spec §5, malformed alias/cardinality packets are **deterministic
+fixtures**; no probabilistic branch forcing was attempted.
+
+**Budget usage:** 1/2 fresh real-agent sessions · 0/2 branch-forcing request
+variants (the single run was natural) · ~14/60 minutes wall clock. Whichever
+limit hit first did not apply; validation stopped voluntarily after the natural
+run provided the relevant evidence.
+
+| Run | Session | Scenario | Result |
+| --- | --- | --- | --- |
+| RC3-E2E-A | `20260911-191400-873a` (scratch repo `C:\frank\aro-rc3-e2e\target-repo`, request 「给订单同步任务增加暂停能力」, driver `scripts/v02_e2e_driver.py`) | Real Pi discovery emitted 3 candidates (REQUIREMENT/TRADE_OFF/FACT) → **all accepted by the new alias-space validation (0 suppression events)** → HG001 (3 questions); answered in two passes: Q1 numeric `1` → `cooperative_flag`; Q2 **full CJK label** (punctuation intact) → `new_task_class`; Q3 key `library_call` → `library_call` | **DONE exit 0** (~13.5 min); task_revision 2; interruptions 1/2; real Codex review raised R001 REGRESSION + R002 DESIGN blockers → REVISION → closure verified → DONE; 3 ACTIVE decisions each persisted with the **correct option key and label**; gate `current == gates[0]` CLOSED; `human-gate.md` renders the closed truth |
+
+Interpretation: the changed boundary accepts well-formed real agent packets
+(the over-rejection risk RC3 introduced did not materialize) and all three
+advertised answer forms resolve through the shared alias space on real packets
+with unmis-recordable Human authority. The **reject** direction (ambiguous
+aliases, >4 options) remains deterministic-fixture coverage by design, exactly
+as the fix-spec prescribes.
+
+### 7.7 RC3 exit criteria status (fix-spec §7)
+
+1. Every accepted Human answer string has exactly one authoritative
+   interpretation — met (shared alias-space invariant at three boundaries).
+2. Cross-option alias collisions fail before Human interaction — met.
+3. Option aliases cannot collide with custom/global-recommend commands — met.
+4. Runtime matching never uses silent first-match-wins on ambiguity — met
+   (fail-closed `None`; corrupt artifacts also rejected at load).
+5. Validation and runtime matching share one alias source of truth — met
+   (`models.py` helpers drive both).
+6. Intake no longer truncates >4 options — met (both `[:4]` slices removed;
+   suppression with deterministic reason).
+7. Malformed alias/cardinality packets create no Gate and consume no
+   interruption — met.
+8. Existing Custom Decision behavior unchanged — met (item-15 regressions +
+   suite).
+9. RC2 B201/B202/B203 regression suites green — met (26/26).
+10. Full deterministic suite, no regression — met (293 passed).
+11. Real Pi/Codex smoke healthy — met (295 passed incl. 2 real).
+12. Validation Budget obeyed, no unbounded probabilistic forcing — met
+    (§7.6: 1 session / 0 forcing variants / ~14 min).
+
+**Readiness:** all twelve RC3 exit criteria are met. V0.2-RC3 is ready for the
+focused independent code review of B301/N301 prescribed by the fix-spec; after
+that review finds no new blocker, the product returns to normal real Shopify
+usage for validation rather than another synthetic RC.

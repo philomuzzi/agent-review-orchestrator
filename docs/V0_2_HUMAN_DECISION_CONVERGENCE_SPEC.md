@@ -1,6 +1,6 @@
 # Agent Review Orchestrator V0.2 Human Decision & Convergence Specification
 
-**Status:** RC2 implemented (B201/B202/B203/N201/N202 closed, `docs/V0_2_RC2_FIX_SPEC.md`) — deterministic suite green (255 passed, incl. 26 RC2 regressions), real Pi/Codex smoke green; real-agent validation partially recorded (hardened candidate boundary + `resume_semantics` exercised live; the FINAL_REVIEW-gate and Problem-Mode-FACT routing hops remain deterministic-only, pending the next real workflow — see `docs/V0_2_IMPLEMENTATION_AUDIT.md` §6.7–6.9).
+**Status:** RC3 implemented (B301 Human Answer Alias Space + N301 Intake cardinality closed, `docs/V0_2_RC3_FIX_SPEC.md`) — deterministic suite green (293 passed, incl. 38 RC3 regressions), real Pi/Codex smoke green, RC3 real-agent supplemental evidence recorded within the mandatory validation budget; all twelve RC3 exit criteria met (`docs/V0_2_IMPLEMENTATION_AUDIT.md` §7), pending the focused independent B301/N301 code review before returning to normal real Shopify usage. Prior RC2 record: B201/B202/B203/N201/N202 closed; the FINAL_REVIEW-gate and Problem-Mode-FACT routing hops remain deterministic-only until the next real workflow (§6.7–6.9).
 **Target:** V0.2
 **Baseline:** V0.1-RC3
 **Primary evidence:** `docs/V0_1_CASE_AUDIT_20260911_PROD001_HANDOFF.md`

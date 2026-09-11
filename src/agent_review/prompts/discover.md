@@ -43,8 +43,14 @@ No timestamp, no repository name, no verbatim prompt truncation.
 - `task_kind`: "CHANGE" for modifications/new capability; "PROBLEM" when the
   request primarily describes a fault to investigate.
 - `human_candidates`: ONLY categories REQUIREMENT, FACT, TRADE_OFF, SCOPE.
-  Each candidate needs 2-4 options with genuinely different impacts, and a
-  `recommendation` only when you can justify one (else null).
+  Each candidate needs exactly 2-4 options with genuinely different
+  impacts (candidates outside 2-4 are rejected, never truncated), and a
+  `recommendation` only when you can justify one (else null). Within one
+  candidate, option keys and labels must be mutually distinct after
+  case/whitespace normalization and must not look like the answer
+  shortcuts (`1`-`4`, `选项N`, `option N`) or the reserved commands
+  (`0`, `custom`, `自定义`, `按推荐`/`都按推荐`); ambiguous packets are
+  rejected.
   Do NOT gate on: naming, local code organization, reviewer taste, optional
   future extensibility, or anything derivable from the repository.
 

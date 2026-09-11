@@ -54,15 +54,23 @@ For EVERY listed issue, return exactly one outcome:
      the existing decisions;
    - `options`: 2-4 meaningful, mutually distinct options, each with
      `key`, `label`, `impact`; option keys must be unique (including
-     after case/whitespace normalization) and must not collide with
-     the reserved custom selectors `0` / `custom` / `自定义`;
+     after case/whitespace normalization) and keys/labels must not
+     collide with each other, with the answer shortcuts (`1`-`4`,
+     `选项N`, `option N`) or with the reserved custom selectors
+     `0` / `custom` / `自定义` and recommendation selectors
+     (`按推荐`/`都按推荐`) — the Human may answer by key, label or
+     number, so every answer form must resolve to exactly one option;
+     packets outside 2-4 options or with ambiguous aliases are
+     rejected (never truncated or auto-renamed);
    - `recommendation`: an option key or null (only when genuinely
      justified);
    - `source_issue_ids`: the issue ids this candidate resolves — they
      must come from the pending list above and MUST include the issue
      this outcome is for.
-   Invalid packets (fewer than 2 options, unknown recommendation,
-   empty question, duplicate or colliding option keys, non-semantic
+   Invalid packets (option counts outside 2-4, unknown recommendation,
+   empty question, duplicate or colliding option keys, ambiguous answer
+   aliases — keys/labels/numbers that resolve to more than one option or
+   to a reserved command — non-semantic
    category, wrong or unknown source issue ids) are rejected and the
    workflow fails closed.
 

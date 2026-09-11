@@ -38,7 +38,11 @@ Find the root cause, or state honestly that it is UNRESOLVED.
   that would change the fix direction. Otherwise UNRESOLVED.
 - `missing_evidence`: what you would need (and cannot obtain read-only).
 - `human_candidates`: FACT questions only (things a human knows that the
-  repository cannot answer), each with 2-4 options.
+  repository cannot answer), each with exactly 2-4 options (candidates
+  outside 2-4 are rejected, never truncated); within one candidate,
+  option keys and labels must be mutually distinct after normalization
+  and must not collide with the answer shortcuts or reserved commands.
+  Ambiguous packets are rejected.
 
 ## Hard rules
 
