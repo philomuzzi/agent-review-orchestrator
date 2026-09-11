@@ -74,6 +74,20 @@ Core rules (full contracts in [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEME
 - A human decision that changes the design basis bumps `task_revision`; the old
   proposal goes to `history/` marked STALE and the session redesigns.
 
+## Roadmap
+
+```text
+V0    Fixed Agent Workflow
+V0.1  Runtime Progress Visibility / Session Presentation
+V0.2  Human Decision & Convergence
+V0.3  Workflow Telemetry
+V0.5  Role-Based Agent Assignment
+V0.7  Multi Reviewer
+V1    Capability-Based Agent Routing
+```
+
+V0.2 was promoted from a reserved slot after real Shopify workflow evidence showed two prerequisite gaps: a Human could only choose Agent-proposed options, and downstream `NEED_HUMAN` review issues could terminate the session even when the required semantics were already decided or could have been resolved through another bounded Human Gate. See [`docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md`](docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md).
+
 ## Session state
 
 Everything lands under the target repository:
