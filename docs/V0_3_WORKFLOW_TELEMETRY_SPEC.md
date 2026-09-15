@@ -1,6 +1,10 @@
 # Agent Review Orchestrator V0.3 Workflow Telemetry Specification
 
-**Status:** Proposed
+**Status:** Superseded — the V0.3 slot was occupied by Convergence Quality
+(`V0.3_CONVERGENCE_QUALITY_DESIGN.md`, sole source of truth). The telemetry
+collection described here shipped as part of V0.3 §59
+(`telemetry.py` → `telemetry.json`); the broader observability roadmap
+items remain candidates for later versions.
 **Purpose:** Build an observability and experiment-data foundation before Role-Based Agent Assignment.
 
 ---

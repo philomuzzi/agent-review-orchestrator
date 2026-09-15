@@ -41,9 +41,11 @@ SYMBOL_RETRY = "↻"
 # Deterministic agent-activity line per phase (no agent-invented text).
 AGENT_ACTIVITY: dict[str, str] = {
     "DISCOVER": "Pi inspecting repository...",
+    "SCOPE_GUARD": "Pi assessing single-session scope...",
     "INVESTIGATE": "Pi investigating root cause...",
     "DESIGN": "Pi designing...",
     "REVISION": "Pi revising design...",
+    "FOCUSED_REVISION": "Pi applying focused revision...",
     "ABLATION": "Pi simplifying the design (ablation)...",
     "INITIAL_REVIEW": "Codex reviewing proposal...",
     "CLOSURE_REVIEW": "Codex verifying revisions...",
@@ -57,6 +59,8 @@ QUIET_EVENTS = {
     "HUMAN_GATE_CREATED",
     "CONVERGENCE_GATE_CREATED",
     "HUMAN_GATE_WAITING_NONINTERACTIVE",
+    "SCOPE_GUARD_STOPPED",
+    "CORRECTION_STOPPED",
     "SESSION_DONE",
     "SESSION_HUMAN_HANDOFF",
     "SESSION_FAILED",
@@ -250,17 +254,47 @@ class ProgressRenderer:
 
     def _on_session_done(self, event: dict) -> None:
         self._phase_header_shown = False
-        self._write(f"{self._stamp(event)} {SYMBOL_DONE} DONE · final.md generated")
+        status = event.get("result_status") or "APPROVED"
+        self._write(
+            f"{self._stamp(event)} {SYMBOL_DONE} DONE · final.md generated · "
+            f"result {status}"
+        )
 
     def _on_session_human_handoff(self, event: dict) -> None:
         self._phase_header_shown = False
         reason = sanitize_line(event.get("reason", "task-level boundary reached"))
-        self._write(f"{self._stamp(event)} {SYMBOL_GATE} HUMAN_HANDOFF · {reason}")
+        status = event.get("result_status") or ""
+        suffix = f" · result {status}" if status else ""
+        self._write(
+            f"{self._stamp(event)} {SYMBOL_GATE} HUMAN_HANDOFF{suffix} · {reason}"
+        )
 
     def _on_session_failed(self, event: dict) -> None:
         self._phase_header_shown = False
         reason = sanitize_line(event.get("reason", "unexpected failure"))
         self._write(f"{self._stamp(event)} {SYMBOL_FAIL} FAILED · {reason}")
+
+    def _on_session_result_written(self, event: dict) -> None:
+        if self.level == OutputLevel.QUIET:
+            return
+        status = event.get("status", "")
+        path = event.get("path", "session-result.md")
+        self._write(
+            f"{self._stamp(event)} {SYMBOL_DONE} session-result.md written "
+            f"(status: {status}) · {path}"
+        )
+
+    def _on_scope_guard_stopped(self, event: dict) -> None:
+        verdict = event.get("verdict", "")
+        count = event.get("decomposition_count", 0)
+        summary = f"{verdict}" + (
+            f" · {count} child sessions proposed" if count else ""
+        )
+        self._phase_line(event, "SCOPE_GUARD", SYMBOL_GATE, summary)
+
+    def _on_correction_stopped(self, event: dict) -> None:
+        reasons = sanitize_line(event.get("reasons", []))
+        self._phase_line(event, "CORRECTION", SYMBOL_GATE, f"stopped · {reasons}")
 
     def _on_session_interrupted(self, event: dict) -> None:
         self._phase_header_shown = False

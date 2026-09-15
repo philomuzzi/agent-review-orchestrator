@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "codex-review.schema.json",
   "title": "Codex Review Outputs",
-  "description": "Structured outputs accepted from the Codex reviewer adapter. Runtime calls constrain codex exec with the per-phase model schema; this file is the static union for documentation and tooling.",
+  "description": "Structured outputs accepted from the Codex reviewer adapter. Runtime calls constrain codex exec with the per-phase model schema; this file is the static union for documentation and tooling. V0.3: issues carry correction_action/focus_area/change_scope/origin; initial/final reviews carry acceptance_coverage; closure outcomes and final results carry correction recommendations with material progress.",
   "oneOf": [
     {
       "$ref": "#/$defs/initial_review"
@@ -15,171 +15,398 @@
     }
   ],
   "$defs": {
-    "initial_review": {
-      "$defs": {
-        "Issue": {
-          "properties": {
-            "id": {
-              "default": "",
-              "title": "Id",
+    "AcceptanceCoverageEntry": {
+      "description": "V0.3 C4 §40: explicit accounting for one acceptance criterion.\n\nThe invariant is that acceptance criteria may not silently\ndisappear from review: a FAIL entry must name the BLOCKING issue\n(by exact title) that carries the criterion in the same result.",
+      "properties": {
+        "criterion": {
+          "title": "Criterion",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "issue_title": {
+          "anyOf": [
+            {
               "type": "string"
             },
-            "category": {
-              "$ref": "#/$defs/IssueCategory",
-              "default": "DESIGN"
-            },
-            "severity": {
-              "$ref": "#/$defs/IssueSeverity",
-              "default": "NON_BLOCKING"
-            },
-            "status": {
-              "$ref": "#/$defs/IssueStatus",
-              "default": "OPEN"
-            },
-            "title": {
-              "title": "Title",
-              "type": "string"
-            },
-            "problem": {
-              "default": "",
-              "title": "Problem",
-              "type": "string"
-            },
-            "evidence": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Evidence",
-              "type": "array"
-            },
-            "impact": {
-              "default": "",
-              "title": "Impact",
-              "type": "string"
-            },
-            "acceptance": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Acceptance",
-              "type": "array"
-            },
-            "introduced_round": {
-              "default": 1,
-              "title": "Introduced Round",
-              "type": "integer"
-            },
-            "provenance": {
-              "default": "INITIAL_REVIEW",
-              "title": "Provenance",
-              "type": "string"
-            },
-            "based_on_task_revision": {
-              "default": 1,
-              "title": "Based On Task Revision",
-              "type": "integer"
-            },
-            "addressed_by": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Addressed By"
-            },
-            "resolution": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Resolution"
-            },
-            "why_not_detected_initially": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Why Not Detected Initially"
-            },
-            "covered_by_decisions": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Covered By Decisions",
-              "type": "array"
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "title"
           ],
-          "title": "Issue",
-          "type": "object"
+          "default": null,
+          "title": "Issue Title"
         },
-        "IssueCategory": {
-          "enum": [
-            "DESIGN",
-            "REQUIREMENT",
-            "FACT",
-            "REGRESSION",
-            "SUGGESTION"
-          ],
-          "title": "IssueCategory",
-          "type": "string"
-        },
-        "IssueSeverity": {
-          "enum": [
-            "BLOCKING",
-            "NON_BLOCKING"
-          ],
-          "title": "IssueSeverity",
-          "type": "string"
-        },
-        "IssueStatus": {
-          "enum": [
-            "OPEN",
-            "ADDRESSED",
-            "RESOLVED",
-            "NEED_HUMAN",
-            "ACCEPTED_RISK",
-            "SUPERSEDED"
-          ],
-          "title": "IssueStatus",
+        "note": {
+          "default": "",
+          "title": "Note",
           "type": "string"
         }
       },
+      "required": [
+        "criterion",
+        "status"
+      ],
+      "title": "AcceptanceCoverageEntry",
+      "type": "object"
+    },
+    "CorrectionAction": {
+      "enum": [
+        "FULL_REVISION",
+        "FOCUSED_REVISION",
+        "ABLATION",
+        "HUMAN_DECISION",
+        "STOP"
+      ],
+      "title": "CorrectionAction",
+      "type": "string"
+    },
+    "FocusArea": {
+      "enum": [
+        "BEHAVIOR",
+        "DATA",
+        "INTEGRATION",
+        "VALIDATION",
+        "OPERABILITY",
+        "PERFORMANCE",
+        "SECURITY",
+        "COMPATIBILITY",
+        "OTHER"
+      ],
+      "title": "FocusArea",
+      "type": "string"
+    },
+    "Issue": {
       "properties": {
-        "issues": {
+        "id": {
+          "default": "",
+          "title": "Id",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/IssueCategory",
+          "default": "DESIGN"
+        },
+        "severity": {
+          "$ref": "#/$defs/IssueSeverity",
+          "default": "NON_BLOCKING"
+        },
+        "status": {
+          "$ref": "#/$defs/IssueStatus",
+          "default": "OPEN"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "problem": {
+          "default": "",
+          "title": "Problem",
+          "type": "string"
+        },
+        "evidence": {
           "items": {
-            "$ref": "#/$defs/Issue"
+            "type": "string"
           },
-          "title": "Issues",
+          "title": "Evidence",
           "type": "array"
         },
-        "summary": {
+        "impact": {
           "default": "",
-          "title": "Summary",
+          "title": "Impact",
+          "type": "string"
+        },
+        "acceptance": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Acceptance",
+          "type": "array"
+        },
+        "introduced_round": {
+          "default": 1,
+          "title": "Introduced Round",
+          "type": "integer"
+        },
+        "provenance": {
+          "default": "INITIAL_REVIEW",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "based_on_task_revision": {
+          "default": 1,
+          "title": "Based On Task Revision",
+          "type": "integer"
+        },
+        "addressed_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Addressed By"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        },
+        "why_not_detected_initially": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Why Not Detected Initially"
+        },
+        "correction_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CorrectionAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "focus_area": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FocusArea"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "change_scope": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Change Scope",
+          "type": "array"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NewIssueOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "covered_by_decisions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered By Decisions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "Issue",
+      "type": "object"
+    },
+    "IssueCategory": {
+      "enum": [
+        "DESIGN",
+        "REQUIREMENT",
+        "FACT",
+        "REGRESSION",
+        "SUGGESTION"
+      ],
+      "title": "IssueCategory",
+      "type": "string"
+    },
+    "IssueSeverity": {
+      "enum": [
+        "BLOCKING",
+        "NON_BLOCKING"
+      ],
+      "title": "IssueSeverity",
+      "type": "string"
+    },
+    "IssueStatus": {
+      "enum": [
+        "OPEN",
+        "ADDRESSED",
+        "RESOLVED",
+        "NEED_HUMAN",
+        "ACCEPTED_RISK",
+        "SUPERSEDED"
+      ],
+      "title": "IssueStatus",
+      "type": "string"
+    },
+    "NewIssueOrigin": {
+      "enum": [
+        "INTRODUCED_BY_CORRECTION",
+        "PREVIOUS_REVIEW_MISS",
+        "NEW_EVIDENCE",
+        "DIRECTLY_REQUIRED_FOR_CLOSURE"
+      ],
+      "title": "NewIssueOrigin",
+      "type": "string"
+    },
+    "IssueOutcome": {
+      "properties": {
+        "issue_id": {
+          "title": "Issue Id",
+          "type": "string"
+        },
+        "resolution": {
+          "title": "Resolution",
+          "type": "string"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "correction_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CorrectionAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "focus_area": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FocusArea"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "material_progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaterialProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "issue_id",
+        "resolution"
+      ],
+      "title": "IssueOutcome",
+      "type": "object"
+    },
+    "MaterialProgress": {
+      "enum": [
+        "PROGRESSED",
+        "NO_PROGRESS"
+      ],
+      "title": "MaterialProgress",
+      "type": "string"
+    },
+    "CorrectionRecommendation": {
+      "description": "V0.3 C2: reviewer recommendation of the next correction step for\none unresolved blocking issue. The orchestrator routes\nmechanically; unknown/malformed actions already failed closed at\nthe enum boundary.",
+      "properties": {
+        "issue_id": {
+          "title": "Issue Id",
+          "type": "string"
+        },
+        "correction_action": {
+          "$ref": "#/$defs/CorrectionAction"
+        },
+        "focus_area": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FocusArea"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "material_progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaterialProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
           "type": "string"
         }
       },
-      "title": "InitialReviewResult",
+      "required": [
+        "issue_id",
+        "correction_action"
+      ],
+      "title": "CorrectionRecommendation",
       "type": "object"
     },
     "closure_review": {
       "$defs": {
+        "CorrectionAction": {
+          "enum": [
+            "FULL_REVISION",
+            "FOCUSED_REVISION",
+            "ABLATION",
+            "HUMAN_DECISION",
+            "STOP"
+          ],
+          "title": "CorrectionAction",
+          "type": "string"
+        },
+        "FocusArea": {
+          "enum": [
+            "BEHAVIOR",
+            "DATA",
+            "INTEGRATION",
+            "VALIDATION",
+            "OPERABILITY",
+            "PERFORMANCE",
+            "SECURITY",
+            "COMPATIBILITY",
+            "OTHER"
+          ],
+          "title": "FocusArea",
+          "type": "string"
+        },
         "Issue": {
           "properties": {
             "id": {
@@ -277,6 +504,46 @@
               ],
               "default": null,
               "title": "Why Not Detected Initially"
+            },
+            "correction_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CorrectionAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "focus_area": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FocusArea"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "change_scope": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Change Scope",
+              "type": "array"
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NewIssueOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "covered_by_decisions": {
               "items": {
@@ -317,6 +584,39 @@
               "default": "",
               "title": "Note",
               "type": "string"
+            },
+            "correction_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CorrectionAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "focus_area": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FocusArea"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "material_progress": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MaterialProgress"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           },
           "required": [
@@ -344,6 +644,24 @@
             "SUPERSEDED"
           ],
           "title": "IssueStatus",
+          "type": "string"
+        },
+        "MaterialProgress": {
+          "enum": [
+            "PROGRESSED",
+            "NO_PROGRESS"
+          ],
+          "title": "MaterialProgress",
+          "type": "string"
+        },
+        "NewIssueOrigin": {
+          "enum": [
+            "INTRODUCED_BY_CORRECTION",
+            "PREVIOUS_REVIEW_MISS",
+            "NEW_EVIDENCE",
+            "DIRECTLY_REQUIRED_FOR_CLOSURE"
+          ],
+          "title": "NewIssueOrigin",
           "type": "string"
         }
       },
@@ -373,6 +691,113 @@
     },
     "final_review": {
       "$defs": {
+        "AcceptanceCoverageEntry": {
+          "description": "V0.3 C4 §40: explicit accounting for one acceptance criterion.\n\nThe invariant is that acceptance criteria may not silently\ndisappear from review: a FAIL entry must name the BLOCKING issue\n(by exact title) that carries the criterion in the same result.",
+          "properties": {
+            "criterion": {
+              "title": "Criterion",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "issue_title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Issue Title"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "criterion",
+            "status"
+          ],
+          "title": "AcceptanceCoverageEntry",
+          "type": "object"
+        },
+        "CorrectionAction": {
+          "enum": [
+            "FULL_REVISION",
+            "FOCUSED_REVISION",
+            "ABLATION",
+            "HUMAN_DECISION",
+            "STOP"
+          ],
+          "title": "CorrectionAction",
+          "type": "string"
+        },
+        "CorrectionRecommendation": {
+          "description": "V0.3 C2: reviewer recommendation of the next correction step for\none unresolved blocking issue. The orchestrator routes\nmechanically; unknown/malformed actions already failed closed at\nthe enum boundary.",
+          "properties": {
+            "issue_id": {
+              "title": "Issue Id",
+              "type": "string"
+            },
+            "correction_action": {
+              "$ref": "#/$defs/CorrectionAction"
+            },
+            "focus_area": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FocusArea"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "material_progress": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MaterialProgress"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "issue_id",
+            "correction_action"
+          ],
+          "title": "CorrectionRecommendation",
+          "type": "object"
+        },
+        "FocusArea": {
+          "enum": [
+            "BEHAVIOR",
+            "DATA",
+            "INTEGRATION",
+            "VALIDATION",
+            "OPERABILITY",
+            "PERFORMANCE",
+            "SECURITY",
+            "COMPATIBILITY",
+            "OTHER"
+          ],
+          "title": "FocusArea",
+          "type": "string"
+        },
         "Issue": {
           "properties": {
             "id": {
@@ -471,6 +896,46 @@
               "default": null,
               "title": "Why Not Detected Initially"
             },
+            "correction_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CorrectionAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "focus_area": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FocusArea"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "change_scope": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Change Scope",
+              "type": "array"
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NewIssueOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "covered_by_decisions": {
               "items": {
                 "type": "string"
@@ -515,6 +980,24 @@
           ],
           "title": "IssueStatus",
           "type": "string"
+        },
+        "MaterialProgress": {
+          "enum": [
+            "PROGRESSED",
+            "NO_PROGRESS"
+          ],
+          "title": "MaterialProgress",
+          "type": "string"
+        },
+        "NewIssueOrigin": {
+          "enum": [
+            "INTRODUCED_BY_CORRECTION",
+            "PREVIOUS_REVIEW_MISS",
+            "NEW_EVIDENCE",
+            "DIRECTLY_REQUIRED_FOR_CLOSURE"
+          ],
+          "title": "NewIssueOrigin",
+          "type": "string"
         }
       },
       "properties": {
@@ -537,6 +1020,20 @@
           "title": "Issues",
           "type": "array"
         },
+        "acceptance_coverage": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCoverageEntry"
+          },
+          "title": "Acceptance Coverage",
+          "type": "array"
+        },
+        "correction_recommendations": {
+          "items": {
+            "$ref": "#/$defs/CorrectionRecommendation"
+          },
+          "title": "Correction Recommendations",
+          "type": "array"
+        },
         "summary": {
           "default": "",
           "title": "Summary",
@@ -544,6 +1041,288 @@
         }
       },
       "title": "FinalReviewResult",
+      "type": "object"
+    },
+    "initial_review": {
+      "$defs": {
+        "AcceptanceCoverageEntry": {
+          "description": "V0.3 C4 §40: explicit accounting for one acceptance criterion.\n\nThe invariant is that acceptance criteria may not silently\ndisappear from review: a FAIL entry must name the BLOCKING issue\n(by exact title) that carries the criterion in the same result.",
+          "properties": {
+            "criterion": {
+              "title": "Criterion",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "issue_title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Issue Title"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "criterion",
+            "status"
+          ],
+          "title": "AcceptanceCoverageEntry",
+          "type": "object"
+        },
+        "CorrectionAction": {
+          "enum": [
+            "FULL_REVISION",
+            "FOCUSED_REVISION",
+            "ABLATION",
+            "HUMAN_DECISION",
+            "STOP"
+          ],
+          "title": "CorrectionAction",
+          "type": "string"
+        },
+        "FocusArea": {
+          "enum": [
+            "BEHAVIOR",
+            "DATA",
+            "INTEGRATION",
+            "VALIDATION",
+            "OPERABILITY",
+            "PERFORMANCE",
+            "SECURITY",
+            "COMPATIBILITY",
+            "OTHER"
+          ],
+          "title": "FocusArea",
+          "type": "string"
+        },
+        "Issue": {
+          "properties": {
+            "id": {
+              "default": "",
+              "title": "Id",
+              "type": "string"
+            },
+            "category": {
+              "$ref": "#/$defs/IssueCategory",
+              "default": "DESIGN"
+            },
+            "severity": {
+              "$ref": "#/$defs/IssueSeverity",
+              "default": "NON_BLOCKING"
+            },
+            "status": {
+              "$ref": "#/$defs/IssueStatus",
+              "default": "OPEN"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "problem": {
+              "default": "",
+              "title": "Problem",
+              "type": "string"
+            },
+            "evidence": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Evidence",
+              "type": "array"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "acceptance": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Acceptance",
+              "type": "array"
+            },
+            "introduced_round": {
+              "default": 1,
+              "title": "Introduced Round",
+              "type": "integer"
+            },
+            "provenance": {
+              "default": "INITIAL_REVIEW",
+              "title": "Provenance",
+              "type": "string"
+            },
+            "based_on_task_revision": {
+              "default": 1,
+              "title": "Based On Task Revision",
+              "type": "integer"
+            },
+            "addressed_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Addressed By"
+            },
+            "resolution": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Resolution"
+            },
+            "why_not_detected_initially": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why Not Detected Initially"
+            },
+            "correction_action": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CorrectionAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "focus_area": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FocusArea"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "change_scope": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Change Scope",
+              "type": "array"
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NewIssueOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "covered_by_decisions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Covered By Decisions",
+              "type": "array"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "Issue",
+          "type": "object"
+        },
+        "IssueCategory": {
+          "enum": [
+            "DESIGN",
+            "REQUIREMENT",
+            "FACT",
+            "REGRESSION",
+            "SUGGESTION"
+          ],
+          "title": "IssueCategory",
+          "type": "string"
+        },
+        "IssueSeverity": {
+          "enum": [
+            "BLOCKING",
+            "NON_BLOCKING"
+          ],
+          "title": "IssueSeverity",
+          "type": "string"
+        },
+        "IssueStatus": {
+          "enum": [
+            "OPEN",
+            "ADDRESSED",
+            "RESOLVED",
+            "NEED_HUMAN",
+            "ACCEPTED_RISK",
+            "SUPERSEDED"
+          ],
+          "title": "IssueStatus",
+          "type": "string"
+        },
+        "NewIssueOrigin": {
+          "enum": [
+            "INTRODUCED_BY_CORRECTION",
+            "PREVIOUS_REVIEW_MISS",
+            "NEW_EVIDENCE",
+            "DIRECTLY_REQUIRED_FOR_CLOSURE"
+          ],
+          "title": "NewIssueOrigin",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "acceptance_coverage": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCoverageEntry"
+          },
+          "title": "Acceptance Coverage",
+          "type": "array"
+        },
+        "summary": {
+          "default": "",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "InitialReviewResult",
       "type": "object"
     }
   }

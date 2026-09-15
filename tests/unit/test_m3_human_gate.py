@@ -201,9 +201,11 @@ def test_scenario_11_stale_proposal_forces_redesign(repo):
     class Stop(Exception):
         pass
 
-    # Run discovery/intake/design manually by stepping the orchestrator.
+    # Run discovery/scope-guard/intake/design manually by stepping the
+    # orchestrator (V0.3: DISCOVER -> SCOPE_GUARD -> INTAKE).
     o.step()  # INIT -> DISCOVER
-    o.step()  # DISCOVER -> INTAKE
+    o.step()  # DISCOVER -> SCOPE_GUARD
+    o.step()  # SCOPE_GUARD -> INTAKE
     o.step()  # INTAKE -> DESIGN
     o.step()  # DESIGN -> INITIAL_REVIEW (proposal persisted)
     assert o.state.phase == Phase.INITIAL_REVIEW
@@ -345,9 +347,11 @@ def test_decisions_append_only_and_superseded(repo):
 
 
 def test_scenario_13_third_interruption_handoff(repo):
-    candidates = [candidate(question=f"Q{i}?") for i in range(1, 8)]  # 7 decisions
+    # V0.3 C5: independent candidates batch up to 6 per gate, so the
+    # third interruption needs 13 candidates (6 + 6 + 1).
+    candidates = [candidate(question=f"Q{i}?") for i in range(1, 14)]
     pi = FakePiAdapter(script={"discover": [discovery_with_candidates(candidates)]})
-    ui = ScriptedUI(answers=["1", "1", "1", "1", "1", "1"])
+    ui = ScriptedUI(answers=["1"] * 12)
     o = make_orchestrator(repo, pi=pi, ui=ui)
     code = o.run()
     assert code == int(ExitCode.HUMAN_HANDOFF)

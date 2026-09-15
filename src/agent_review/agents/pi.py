@@ -33,9 +33,11 @@ from agent_review.models import (
     ChangeContract,
     DesignResult,
     DiscoveryResult,
+    FocusedRevisionResult,
     HumanAuthorityCheckResult,
     InvestigationResult,
     RevisionResult,
+    ScopeAssessment,
     SessionState,
 )
 
@@ -450,6 +452,26 @@ class RealPiAdapter:
         )
         return self._call("discover", prompt, DiscoveryResult)
 
+    def scope_guard(self, state: SessionState, discovery=None) -> ScopeAssessment:
+        """V0.3 C0: single-session suitability judgment after DISCOVER.
+
+        Read-only scope assessment. The Agent judges probabilistically;
+        the deterministic orchestrator controls continuation (design
+        §12) — no Agent may silently override this verdict.
+        """
+        discovery_ctx = "(discovery unavailable)"
+        if discovery is not None:
+            discovery_ctx = _json_compact(json.loads(discovery.model_dump_json()))
+        prompt = render_prompt(
+            "scope_guard",
+            request=state.request,
+            repo=str(self.repository),
+            discovery=discovery_ctx,
+            listing=repository_listing(self.repository),
+            schema=_json_compact(ScopeAssessment.model_json_schema()),
+        )
+        return self._call("scope_guard", prompt, ScopeAssessment)
+
     def human_authority_check(
         self,
         state: SessionState,
@@ -538,6 +560,35 @@ class RealPiAdapter:
             schema=_json_compact(RevisionResult.model_json_schema()),
         )
         return self._call("revise", prompt, RevisionResult)
+
+    def focused_revise(
+        self,
+        state: SessionState,
+        contract: ChangeContract,
+        proposal: DesignResult,
+        issues: list,
+        allowed_change_scope: list[str] | None = None,
+        preserved_invariants: list[str] | None = None,
+    ) -> FocusedRevisionResult:
+        """V0.3 C3: focused correction of a bounded part of the design."""
+        scope = list(allowed_change_scope or [])
+        invariants = "\n".join(
+            f"- {item}" for item in (preserved_invariants or [])
+        ) or "(none listed)"
+        prompt = render_prompt(
+            "focused_revision",
+            request=state.request,
+            repo=str(self.repository),
+            contract=_json_compact(json.loads(contract.model_dump_json())),
+            proposal=_json_compact(json.loads(proposal.model_dump_json())),
+            issues=_json_compact([json.loads(i.model_dump_json()) for i in issues]),
+            allowed_scope=";\n".join(scope)
+            or "(semantic scope: only what the target issues require)",
+            preserved_invariants=invariants,
+            task_revision=state.task_revision,
+            schema=_json_compact(FocusedRevisionResult.model_json_schema()),
+        )
+        return self._call("focused_revise", prompt, FocusedRevisionResult)
 
     def ablate(
         self,

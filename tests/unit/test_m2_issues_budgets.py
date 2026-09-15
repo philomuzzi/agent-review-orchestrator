@@ -17,6 +17,7 @@ from agent_review.models import (
     Phase,
     SessionStatus,
 )
+from agent_review.models import CorrectionAction
 from agent_review.orchestrator import Orchestrator
 from agent_review.phases.review import compute_pass
 
@@ -87,10 +88,13 @@ def test_scenario_2_blocker_revision_closure_pass(repo):
     assert any(c[0] == "revise" for c in pi.calls)
 
 
-# --- Scenario 3/4: blocker unchanged -> ablation -> PASS ---------------------
+# --- Scenario 3/4 (V0.3): explicit ABLATION recommendation -> ablation -> PASS ---
 
 
 def test_scenario_3_4_ablation_pass(repo):
+    """V0.3 §28: ABLATION routes only on an explicit reviewer
+    recommendation (remove/simplify), never as the default fallback
+    after a failed revision."""
     codex = FakeCodexAdapter(
         script={
             "initial_review": [blocker_review_json()],
@@ -98,7 +102,13 @@ def test_scenario_3_4_ablation_pass(repo):
                 json.dumps(
                     {
                         "issue_outcomes": [
-                            {"issue_id": "R001", "resolution": "UNRESOLVED", "note": "not fixed"}
+                            {
+                                "issue_id": "R001",
+                                "resolution": "UNRESOLVED",
+                                "note": "over-design: the capability is optional; simplifying satisfies the requirement",
+                                "correction_action": "ABLATION",
+                                "material_progress": "NO_PROGRESS",
+                            }
                         ],
                         "new_issues": [],
                         "summary": "still broken",
@@ -116,6 +126,9 @@ def test_scenario_3_4_ablation_pass(repo):
     assert issues[0].status == IssueStatus.RESOLVED  # verified in final review
     events = [json.loads(l)["event"] for l in (o.store.dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert "ABLATION_TRIGGERED" in events
+    # explicit routing is auditable
+    raw = [json.loads(l) for l in (o.store.dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(e["event"] == "CORRECTION_ROUTED" and e.get("action") == "ABLATION" for e in raw)
 
 
 # --- Scenario 5: ablation still blocked -> HUMAN_HANDOFF ---------------------
@@ -129,7 +142,12 @@ def test_scenario_5_ablation_still_blocked_handoff(repo):
                 json.dumps(
                     {
                         "issue_outcomes": [
-                            {"issue_id": "R001", "resolution": "UNRESOLVED", "note": "no"}
+                            {
+                                "issue_id": "R001",
+                                "resolution": "UNRESOLVED",
+                                "note": "simplify: removing the capability is the minimum sufficient design",
+                                "correction_action": "ABLATION",
+                            }
                         ],
                         "new_issues": [],
                         "summary": "still broken",
@@ -152,7 +170,13 @@ def test_scenario_5_ablation_still_blocked_handoff(repo):
     assert code == int(ExitCode.HUMAN_HANDOFF)
     assert o.state.phase == Phase.HUMAN_HANDOFF
     assert o.state.status == SessionStatus.HUMAN_HANDOFF
-    assert "ablation budget exhausted" in (o.state.handoff_reason or "")
+    # V0.3: a precise engineering conclusion, not an ambiguous handoff —
+    # and never NEEDS_HUMAN_DECISION (no Human authority is missing).
+    assert o.state.result_status == "DESIGN_NOT_APPROVED"
+    assert "correction stopped" in (o.state.handoff_reason or "")
+    result = o.store.read_text("session-result.md")
+    assert result and "DESIGN_NOT_APPROVED" in result
+    assert "Remaining Blocking Issues" in result
 
 
 # --- Scenario 18: NON_BLOCKING does not block PASS ---------------------------
@@ -211,6 +235,9 @@ def test_closure_regression_blocker_allowed(repo):
 
     regression = make_blocking_issue(9, "revision breaks pause/resume")
     regression.category = IssueCategory.REGRESSION
+    # V0.3: the late blocker carries an explicit focused correction so
+    # the flow can still converge after it (regression stays BLOCKING).
+    regression.correction_action = CorrectionAction.FOCUSED_REVISION
     codex = FakeCodexAdapter(
         script={
             "initial_review": [blocker_review_json()],
@@ -228,22 +255,33 @@ def test_closure_regression_blocker_allowed(repo):
         }
     )
     o, code = run_flow(repo, codex=codex)
-    # Regression stays BLOCKING -> no PASS -> ablation -> final default passes.
+    # Regression stays BLOCKING -> no PASS -> focused revision -> closure
+    # resolves -> DONE (never auto-ablation).
     assert code == int(ExitCode.DONE)
+    assert o.state.budgets.ablation_used == 0
+    assert o.state.budgets.focused_revision_used == 1
     issues = {i.id: i for i in o.store.load_issues().issues}
     assert issues["R002"].severity == IssueSeverity.BLOCKING
     assert issues["R002"].status == IssueStatus.RESOLVED
+    assert issues["R002"].origin is not None
 
 
 def test_no_revision_budget_routes_straight_to_ablation(repo):
+    """V0.3: with revision budget 0 and an EXPLICIT ablation
+    recommendation, routing goes straight to ABLATION; without the
+    recommendation it stops as DESIGN_NOT_APPROVED instead (no default
+    fallback)."""
     config = Config()
     config.budgets.max_revision_rounds = 0
+    blocker = make_blocking_issue(1).model_copy(update={"correction_action": CorrectionAction.ABLATION})
     o = Orchestrator.create(
         repository=repo,
         request="add pause capability",
         config=config,
         pi=FakePiAdapter(),
-        codex=FakeCodexAdapter(script={"initial_review": [blocker_review_json()]}),
+        codex=FakeCodexAdapter(
+            script={"initial_review": [json.dumps({"issues": [json.loads(blocker.model_dump_json())]})]}
+        ),
     )
     code = o.run()
     assert code == int(ExitCode.DONE)

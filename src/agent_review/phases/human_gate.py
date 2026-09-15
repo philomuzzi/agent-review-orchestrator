@@ -25,6 +25,7 @@ from agent_review.models import (
     AnswerValidation,
     AnswerType,
     AuthorityOutcome,
+    CorrectionAction,
     CUSTOM_REQUEST_ANSWERS,
     DECISION_SEMANTIC_CATEGORIES,
     GLOBAL_RECOMMEND_ANSWERS,
@@ -43,6 +44,7 @@ from agent_review.models import (
     HumanGate,
     IssueStatus,
     Phase,
+    ResultStatus,
     SessionStatus,
     TaskKind,
     normalize_answer_text,
@@ -56,7 +58,13 @@ from agent_review.models import (
 # authority-check candidates (V0.2-RC2 B203). CONVERGENCE is a gate
 # routing category — never a Human decision semantic.
 DECISION_CATEGORIES = set(DECISION_SEMANTIC_CATEGORIES)
-MAX_QUESTIONS_PER_GATE = 3
+# V0.3 C5 §51: independent gate candidates batch into ONE gate. The
+# 3-per-gate cap from V0 fragmented independent questions into chained
+# same-second gates (both 20260914 real cases); the cap rises to 6 so
+# the observed independent-candidate counts batch in a single Human
+# interruption. REQUIREMENT_TOO_AMBIGUOUS remains the safety valve
+# beyond the cap.
+MAX_QUESTIONS_PER_GATE = 6
 MAX_ANSWER_PASSES = 2  # bounded re-ask rounds before waiting again
 
 # Protocol control commands (V0.2-RC3 B301): defined once in models as
@@ -212,6 +220,7 @@ def create_gate(
             f"{o.state.limits.max_human_interruptions}); unresolved decisions: "
             + ", ".join(q.decision_key for q in questions),
             pending_questions=questions,
+            result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
         )
         return None
 
@@ -475,16 +484,62 @@ def invalidate_design_basis(o, reason: str) -> None:
 
 
 def _gate_from_candidates(o, candidates: list[HumanCandidate]) -> tuple[bool, ExitCode | None]:
-    """Returns (gate_created, terminal_exit_code)."""
+    """Returns (gate_created, terminal_exit_code).
+
+    V0.3 C5 §51: a candidate may be deferred ONLY when its final
+    question or valid options materially depend on answers from the
+    current Human Gate (``depends_on`` referencing another batched or
+    deferred candidate key). Independent candidates are batched into
+    the same gate; the overflow beyond MAX_QUESTIONS_PER_GATE stays a
+    REQUIREMENT_TOO_AMBIGUOUS deferral.
+    """
     eligible, _suppressed = eligible_candidates(o, candidates)
     if not eligible:
         return False, None
-    questions = [_to_question(c) for c in eligible]
-    remaining: list[str] = []
+    decided = {
+        d.decision_key
+        for d in o.store.load_decisions().decisions
+        if d.status == DecisionStatus.ACTIVE
+    }
+
+    def _key(c: HumanCandidate) -> str:
+        return candidate_key_of(c)
+
+    batch: list[HumanCandidate] = []
+    deferred: list[HumanCandidate] = []
+    for c in eligible:
+        open_deps = set(c.depends_on) - {_key(c)} - decided
+        if open_deps:
+            deferred.append(c)
+        else:
+            batch.append(c)
+    # Transitive fixpoint: a deferred candidate whose dependencies all
+    # fell out of the gate sets is independent after all.
+    changed = True
+    while changed:
+        changed = False
+        gate_keys = {_key(x) for x in batch} | {
+            _key(x) for x in deferred
+        }
+        for c in list(deferred):
+            open_deps = set(c.depends_on) - {_key(c)} - decided
+            if not open_deps & gate_keys:
+                batch.append(c)
+                deferred.remove(c)
+                changed = True
+    if deferred:
+        o.event(
+            "GATE_CANDIDATE_DEFERRED",
+            deferred=[_key(c) for c in deferred],
+            reason="question or options depend on the current gate's answers",
+        )
+    questions = [_to_question(c) for c in batch]
+    remaining = [_key(c) for c in deferred]
     if len(questions) > MAX_QUESTIONS_PER_GATE:
         # REQUIREMENT_TOO_AMBIGUOUS: ask only the most upstream decisions,
         # then rerun intake within budget.
-        remaining = [q.decision_key for q in questions[MAX_QUESTIONS_PER_GATE:]]
+        overflow = [q.decision_key for q in questions[MAX_QUESTIONS_PER_GATE:]]
+        remaining = remaining + overflow
         questions = questions[:MAX_QUESTIONS_PER_GATE]
         o.event(
             "REQUIREMENT_TOO_AMBIGUOUS",
@@ -524,7 +579,8 @@ def try_gate_for_unresolved_root_cause(o, result) -> ExitCode | None:
         return None  # gate created; the loop will ask it
     missing = "; ".join(result.missing_evidence) or "root cause could not be supported"
     o.handoff(
-        "root cause UNRESOLVED, missing facts materially affect fix direction: " + missing
+        "root cause UNRESOLVED, missing facts materially affect fix direction: " + missing,
+        result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
     )
     return int(ExitCode.HUMAN_HANDOFF)
 
@@ -709,7 +765,8 @@ def resolve_need_human_issues(
     if result is None:
         o.handoff(
             "human authority check unavailable; cannot determine coverage "
-            "or derive a decision packet for issues: " + ", ".join(issue_ids)
+            "or derive a decision packet for issues: " + ", ".join(issue_ids),
+            result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
         )
         return int(ExitCode.HUMAN_HANDOFF)
 
@@ -722,13 +779,15 @@ def resolve_need_human_issues(
             o.handoff(
                 "human authority check returned an outcome for an unknown "
                 f"issue {outcome.issue_id!r}; failing closed for: "
-                + ", ".join(issue_ids)
+                + ", ".join(issue_ids),
+                result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
             )
             return int(ExitCode.HUMAN_HANDOFF)
         if outcome.issue_id in by_issue:
             o.handoff(
                 "human authority check returned duplicate outcomes for "
-                f"{outcome.issue_id}; failing closed for: " + ", ".join(issue_ids)
+                f"{outcome.issue_id}; failing closed for: " + ", ".join(issue_ids),
+                result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
             )
             return int(ExitCode.HUMAN_HANDOFF)
         by_issue[outcome.issue_id] = outcome
@@ -736,7 +795,8 @@ def resolve_need_human_issues(
     if missing:
         o.handoff(
             "human authority check did not classify issues: "
-            + ", ".join(missing)
+            + ", ".join(missing),
+            result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
         )
         return int(ExitCode.HUMAN_HANDOFF)
 
@@ -757,7 +817,8 @@ def resolve_need_human_issues(
             if bad:
                 o.handoff(
                     f"coverage claim for {issue_id} references non-ACTIVE or "
-                    f"nonexistent decisions {bad}; failing closed"
+                    f"nonexistent decisions {bad}; failing closed",
+                    result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
                 )
                 return int(ExitCode.HUMAN_HANDOFF)
             covered.append((outcome, outcome.referenced_decision_ids, outcome.rationale))
@@ -769,7 +830,8 @@ def resolve_need_human_issues(
             if error is not None:
                 o.handoff(
                     f"invalid decision candidate for {issue_id}: {error}; "
-                    "failing closed"
+                    "failing closed",
+                    result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
                 )
                 return int(ExitCode.HUMAN_HANDOFF)
             key = candidate_decision_key(candidate.category, candidate.question)
@@ -782,7 +844,8 @@ def resolve_need_human_issues(
                     f"human authority check produced duplicate decision_key "
                     f"{key} for issues {candidate_keys[key]} and {issue_id}; "
                     "distinct Human questions must not collapse into one "
-                    "decision identity; failing closed"
+                    "decision identity; failing closed",
+                    result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
                 )
                 return int(ExitCode.HUMAN_HANDOFF)
             candidate_keys[key] = issue_id
@@ -795,7 +858,8 @@ def resolve_need_human_issues(
                     f" ({outcome.rationale.strip()})"
                     if outcome.rationale.strip()
                     else ""
-                )
+                ),
+                result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
             )
             return int(ExitCode.HUMAN_HANDOFF)
 
@@ -827,15 +891,23 @@ def resolve_need_human_issues(
         o.store.save_issues(log)
 
     if not candidates:
-        # Pure coverage: continue the normal solution-correction ladder.
+        # Pure coverage: continue the generic correction engine with the
+        # now-OPEN engineering blockers and their recommendations.
         if not continue_routing:
             # Called from a phase that already owns correction (REVISION /
-            # ABLATION entry re-check); the caller proceeds with the
-            # reverted OPEN blockers itself.
+            # FOCUSED_REVISION / ABLATION entry re-check); the caller
+            # proceeds with the reverted OPEN blockers itself.
             return None
-        from agent_review.phases.review import continue_blocker_routing
+        from agent_review.phases.review import route_engineering_correction
 
-        return continue_blocker_routing(o, allow_revision=allow_revision)
+        return route_engineering_correction(
+            o,
+            attempted_action=(
+                CorrectionAction(o.state.last_correction_action)
+                if o.state.last_correction_action
+                else None
+            ),
+        )
 
     # New Human-owned decisions discovered: open a Convergence Gate.
     questions: list[GateQuestion] = []

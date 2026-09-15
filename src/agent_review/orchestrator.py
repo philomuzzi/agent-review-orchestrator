@@ -19,6 +19,7 @@ from agent_review.config import Config, load_config
 from agent_review.models import (
     ExitCode,
     Phase,
+    ResultStatus,
     SessionState,
     SessionStatus,
     TaskKind,
@@ -227,10 +228,17 @@ class Orchestrator:
         self.state.resume_phase = self.state.phase
         self.state.phase = Phase.FAILED
         self.state.status = SessionStatus.FAILED
+        self.state.result_status = ResultStatus.FAILED.value
         self.store.save_state(self.state)
         self.event("SESSION_FAILED", reason=reason)
+        self._write_terminal_result(ResultStatus.FAILED)
 
-    def handoff(self, reason: str, pending_questions=None) -> None:
+    def handoff(
+        self,
+        reason: str,
+        pending_questions=None,
+        result_status: str | None = None,
+    ) -> None:
         """Enter HUMAN_HANDOFF and persist a structured handoff package.
 
         V0.2 Capability E: the handoff is no longer only a one-line
@@ -240,6 +248,19 @@ class Orchestrator:
         the resumability boundary. It is an aid for the Human, never a
         mechanism for the orchestrator to invent decisions.
 
+        V0.3 C1: ``result_status`` records the user-facing terminal
+        classification (DESIGN_NOT_APPROVED / NEEDS_HUMAN_DECISION /
+        DECOMPOSITION_REQUIRED / OUT_OF_SCOPE), kept strictly separate
+        from the internal HUMAN_HANDOFF phase (design §56). When a
+        caller does not classify explicitly, the classification is
+        derived mechanically from persisted state: pending Human
+        decision work (pending questions, an open gate, un-covered
+        NEED_HUMAN issues) means NEEDS_HUMAN_DECISION; everything else
+        is an engineering conclusion (DESIGN_NOT_APPROVED). Agent
+        convergence failure is never mislabeled as a Human decision
+        need. Every terminal session also generates ``session-result.md``
+        (deterministic renderer, minimal fallback) and ``telemetry.json``.
+
         V0.2-RC2 (N201): a rendering failure must not silently discard
         the durable package. A minimal deterministic fallback is written
         (session id, sanitized reason, blocking issue ids, explicit
@@ -248,11 +269,14 @@ class Orchestrator:
         ``HANDOFF_WRITE_FAILED`` event is emitted. The package failure
         never overrides the terminal state in either path.
         """
+        if result_status is None:
+            result_status = self._derive_result_status(pending_questions)
         self.state.handoff_reason = reason
         self.state.phase = Phase.HUMAN_HANDOFF
         self.state.status = SessionStatus.HUMAN_HANDOFF
+        self.state.result_status = result_status
         self.store.save_state(self.state)
-        self.event("SESSION_HUMAN_HANDOFF", reason=reason)
+        self.event("SESSION_HUMAN_HANDOFF", reason=reason, result_status=result_status)
         try:
             from agent_review.rendering import render_handoff  # noqa: PLC0415
 
@@ -269,6 +293,90 @@ class Orchestrator:
             # The handoff package is an aid; its failure must never mask
             # the terminal handoff state that is already persisted.
             self._write_minimal_handoff(reason)
+        self._write_terminal_result(ResultStatus(result_status))
+
+    def _derive_result_status(self, pending_questions) -> str:
+        """Mechanical NEEDS_HUMAN_DECISION vs DESIGN_NOT_APPROVED rule.
+
+        Genuine Human authority work outstanding (pending gate
+        questions, an open gate, NEED_HUMAN issues whose semantics were
+        not proven covered by ACTIVE decisions) classifies as
+        NEEDS_HUMAN_DECISION; otherwise the stop is an engineering
+        conclusion (design §17/§18).
+        """
+        try:
+            if pending_questions:
+                return ResultStatus.NEEDS_HUMAN_DECISION.value
+            gate = self.store.load_gate_log().current
+            if gate is not None and gate.status.value == "OPEN":
+                return ResultStatus.NEEDS_HUMAN_DECISION.value
+            for issue in self.store.load_issues().issues:
+                if (
+                    issue.status.value == "NEED_HUMAN"
+                    and not issue.covered_by_decisions
+                ):
+                    return ResultStatus.NEEDS_HUMAN_DECISION.value
+        except Exception:
+            pass
+        return ResultStatus.DESIGN_NOT_APPROVED.value
+
+    def _write_terminal_result(self, status: ResultStatus) -> None:
+        """C1: every terminal session gets session-result.md + telemetry.
+
+        Deterministic rendering from persisted artifacts (design §23);
+        a large additional Agent call is never required. Failures of
+        the rich renderer fall back to a minimal deterministic result;
+        a failure of even that never masks the terminal state.
+        """
+        try:
+            from agent_review.rendering import render_session_result  # noqa: PLC0415
+
+            text = render_session_result(self.store, self.state, status)
+            self.store.write_text("session-result.md", text)
+            self.event(
+                "SESSION_RESULT_WRITTEN",
+                status=status.value,
+                path=str(self.store.dir / "session-result.md"),
+            )
+        except Exception:
+            try:
+                from agent_review.progress import sanitize_line  # noqa: PLC0415
+
+                minimal = (
+                    "# Session Result\n\n"
+                    "## Status\n\n"
+                    f"{status.value}\n\n"
+                    "## Summary\n\n"
+                    f"{sanitize_line(self.state.handoff_reason or self.state.error or 'terminal')}\n\n"
+                    f"- session: {sanitize_line(self.state.session_id)}\n"
+                    "- the full structured result could not be rendered; "
+                    "inspect state.json / issues.json / decisions.json / "
+                    "events.jsonl for the complete truth\n"
+                )
+                self.store.write_text("session-result.md", minimal)
+                self.event(
+                    "SESSION_RESULT_WRITTEN",
+                    status=status.value,
+                    path=str(self.store.dir / "session-result.md"),
+                    fallback="minimal",
+                )
+            except Exception:
+                try:
+                    self.event(
+                        "SESSION_RESULT_WRITE_FAILED",
+                        status=status.value,
+                    )
+                except Exception:
+                    pass
+        try:
+            from agent_review.telemetry import write_telemetry  # noqa: PLC0415
+
+            path = write_telemetry(self.store, self.state)
+            self.event("TELEMETRY_WRITTEN", path=str(path))
+        except Exception:
+            # Telemetry is derivable from events.jsonl; a write failure
+            # never affects the terminal state.
+            pass
 
     def _write_minimal_handoff(self, reason: str) -> None:
         """N201: deterministic minimal fallback for handoff.md."""
@@ -435,6 +543,10 @@ class Orchestrator:
             from agent_review.phases import discover
 
             return discover.run(self)
+        if phase == Phase.SCOPE_GUARD:
+            from agent_review.phases import scope_guard
+
+            return scope_guard.run(self)
         if phase == Phase.INVESTIGATE:
             from agent_review.phases import investigate
 
@@ -459,6 +571,10 @@ class Orchestrator:
             from agent_review.phases import revision
 
             return revision.run(self)
+        if phase == Phase.FOCUSED_REVISION:
+            from agent_review.phases import focused_revision
+
+            return focused_revision.run(self)
         if phase == Phase.CLOSURE_REVIEW:
             from agent_review.phases import review
 

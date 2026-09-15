@@ -171,12 +171,19 @@ def option_alias_violation(options) -> str | None:
 class Phase(str, Enum):
     INIT = "INIT"
     DISCOVER = "DISCOVER"
+    # V0.3 C0: scope guard sits between repository discovery and any
+    # solutioning; unsuitable single-session tasks stop before DESIGN.
+    SCOPE_GUARD = "SCOPE_GUARD"
     INVESTIGATE = "INVESTIGATE"
     INTAKE = "INTAKE"
     WAITING_FOR_HUMAN = "WAITING_FOR_HUMAN"
     DESIGN = "DESIGN"
     INITIAL_REVIEW = "INITIAL_REVIEW"
     REVISION = "REVISION"
+    # V0.3 C3: focused correction of a bounded part of an otherwise
+    # valid design; a separate mechanism from full REVISION, not a
+    # sequential life in one generic ladder.
+    FOCUSED_REVISION = "FOCUSED_REVISION"
     CLOSURE_REVIEW = "CLOSURE_REVIEW"
     ABLATION = "ABLATION"
     FINAL_REVIEW = "FINAL_REVIEW"
@@ -193,6 +200,69 @@ class SessionStatus(str, Enum):
     HUMAN_HANDOFF = "HUMAN_HANDOFF"
     INTERRUPTED = "INTERRUPTED"
     FAILED = "FAILED"
+
+
+# V0.3 C1: user-facing terminal result classification. Deliberately a
+# SEPARATE concept from the internal workflow state (design §56): the
+# internal phase may be HUMAN_HANDOFF while the user-facing result is
+# DESIGN_NOT_APPROVED (engineering conclusion) or NEEDS_HUMAN_DECISION
+# (genuine new Human authority required). Agent convergence failure
+# must never be mislabeled as a Human decision need.
+class ResultStatus(str, Enum):
+    APPROVED = "APPROVED"
+    DESIGN_NOT_APPROVED = "DESIGN_NOT_APPROVED"
+    NEEDS_HUMAN_DECISION = "NEEDS_HUMAN_DECISION"
+    DECOMPOSITION_REQUIRED = "DECOMPOSITION_REQUIRED"
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
+    FAILED = "FAILED"
+
+
+# V0.3 C0: scope verdicts after DISCOVER (design §9).
+class ScopeVerdict(str, Enum):
+    BOUNDED = "BOUNDED"
+    DECOMPOSITION_REQUIRED = "DECOMPOSITION_REQUIRED"
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
+
+
+# V0.3 C2: generic correction actions (design §25). Agents RECOMMEND an
+# action; the deterministic orchestrator controls execution (§32).
+class CorrectionAction(str, Enum):
+    FULL_REVISION = "FULL_REVISION"
+    FOCUSED_REVISION = "FOCUSED_REVISION"
+    ABLATION = "ABLATION"
+    HUMAN_DECISION = "HUMAN_DECISION"
+    STOP = "STOP"
+
+
+# V0.3 C2 §31: descriptive focus dimension. NEVER creates additional
+# workflow states — both FOCUSED_REVISION+VALIDATION and
+# FOCUSED_REVISION+DATA use the same workflow path.
+class FocusArea(str, Enum):
+    BEHAVIOR = "BEHAVIOR"
+    DATA = "DATA"
+    INTEGRATION = "INTEGRATION"
+    VALIDATION = "VALIDATION"
+    OPERABILITY = "OPERABILITY"
+    PERFORMANCE = "PERFORMANCE"
+    SECURITY = "SECURITY"
+    COMPATIBILITY = "COMPATIBILITY"
+    OTHER = "OTHER"
+
+
+# V0.3 C4 §43/§45: why a new issue appeared in a later review phase.
+class NewIssueOrigin(str, Enum):
+    INTRODUCED_BY_CORRECTION = "INTRODUCED_BY_CORRECTION"
+    PREVIOUS_REVIEW_MISS = "PREVIOUS_REVIEW_MISS"
+    NEW_EVIDENCE = "NEW_EVIDENCE"
+    DIRECTLY_REQUIRED_FOR_CLOSURE = "DIRECTLY_REQUIRED_FOR_CLOSURE"
+
+
+# V0.3 C4 §46–49: material progress of a persistent blocker, assessed
+# from structured evidence (close-condition delta, notes, changed
+# sections) — never from "looks better" prose.
+class MaterialProgress(str, Enum):
+    PROGRESSED = "PROGRESSED"
+    NO_PROGRESS = "NO_PROGRESS"
 
 
 class TaskKind(str, Enum):
@@ -320,7 +390,12 @@ class ExitCode(int, Enum):
 
 
 class BudgetLimits(BaseModel):
-    max_revision_rounds: int = 1
+    # V0.3 §37: full revision, focused revision and ablation are
+    # semantically different corrective actions, not sequential lives
+    # in one generic ladder. Budgets are NOT increased merely because
+    # V0.2 exhausted them.
+    max_revision_rounds: int = 1  # FULL_REVISION budget
+    max_focused_revision_rounds: int = 1  # FOCUSED_REVISION budget
     max_ablation_rounds: int = 1
     max_human_interruptions: int = 2
     max_protocol_retries: int = 1
@@ -328,6 +403,7 @@ class BudgetLimits(BaseModel):
 
 class BudgetUsage(BaseModel):
     revision_used: int = 0
+    focused_revision_used: int = 0
     ablation_used: int = 0
     human_interruptions_used: int = 0
     protocol_retries_used: int = 0
@@ -344,6 +420,16 @@ class SessionState(BaseModel):
     kind_explicit: bool = False
     phase: Phase = Phase.INIT
     status: SessionStatus = SessionStatus.RUNNING
+    # V0.3 C1: user-facing terminal result classification (None while
+    # running). Written at the terminal boundary together with
+    # session-result.md; never a routing key for the state machine.
+    result_status: Optional[str] = None
+    # V0.3 C0: persisted scope verdict for status/telemetry/audit.
+    scope_verdict: Optional[str] = None
+    # V0.3 C2: the correction mechanism that ran most recently
+    # (FULL_REVISION / FOCUSED_REVISION / ABLATION). Read by closure
+    # routing as the ``attempted_action`` for material-progress stops.
+    last_correction_action: Optional[str] = None
     task_revision: int = 1
     active_gate: Optional[str] = None
     round: int = 0
@@ -375,6 +461,12 @@ class HumanCandidate(BaseModel):
     options: list[GateOption] = Field(default_factory=list)
     recommendation: Optional[str] = None
     source: str = ""
+    # V0.3 C5 §51: decision keys of OTHER candidates whose answers this
+    # question's final wording or valid options materially depend on.
+    # A candidate may be deferred to a later gate ONLY when it declares
+    # such a dependency on the current gate; independent candidates are
+    # batched into the same gate.
+    depends_on: list[str] = Field(default_factory=list)
 
 
 class DiscoveryResult(BaseModel):
@@ -387,6 +479,74 @@ class DiscoveryResult(BaseModel):
     change_surface: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     human_candidates: list[HumanCandidate] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# V0.3 C0: Scope Guard assessment (design §8–§13)
+# ---------------------------------------------------------------------------
+
+
+class DecompositionProposal(BaseModel):
+    """One proposed bounded child session (design §11/§13).
+
+    Split by independent decision/acceptance/outcome boundaries — never
+    mechanically by folder, class or technology name.
+    """
+
+    title: str
+    goal: str
+    inputs: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _require_title_and_goal(self) -> "DecompositionProposal":
+        if not self.title.strip() or not self.goal.strip():
+            raise ValueError("DecompositionProposal requires non-empty title and goal")
+        return self
+
+
+class ScopeAssessment(BaseModel):
+    """Structured scope judgment produced by the Agent after DISCOVER.
+
+    The Agent may judge scope probabilistically; the ORCHESTRATOR
+    controls continuation deterministically (design §12): only a
+    BOUNDED verdict may enter the normal workflow. Per §54 the scope
+    guard must not invent Requirement decisions — when classification
+    depends on a real Requirement ambiguity the Agent classifies
+    conservatively and records the uncertainty instead of guessing.
+    """
+
+    verdict: ScopeVerdict
+    primary_outcome: str = ""
+    independent_outcomes: list[str] = Field(default_factory=list)
+    decision_clusters: list[str] = Field(default_factory=list)
+    change_surfaces: list[str] = Field(default_factory=list)
+    external_unknowns: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    # §54 conservative-classification explanation (optional).
+    uncertainty: str = ""
+    decomposition: list[DecompositionProposal] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _verdict_shape(self) -> "ScopeAssessment":
+        if not self.rationale.strip():
+            raise ValueError("ScopeAssessment requires a non-empty rationale")
+        if self.verdict == ScopeVerdict.DECOMPOSITION_REQUIRED:
+            if len(self.decomposition) < 2:
+                raise ValueError(
+                    "DECOMPOSITION_REQUIRED requires at least two proposed "
+                    "child sessions (a single child session is not a "
+                    "decomposition)"
+                )
+            if not self.independent_outcomes:
+                raise ValueError(
+                    "DECOMPOSITION_REQUIRED requires the independently "
+                    "converging outcomes that motivated the split"
+                )
+        if self.verdict == ScopeVerdict.BOUNDED and not self.primary_outcome.strip():
+            raise ValueError("BOUNDED requires a primary_outcome")
+        return self
 
 
 class Evidence(BaseModel):
@@ -510,6 +670,45 @@ class RevisionResult(BaseModel):
     notes: str = ""
 
 
+# ---------------------------------------------------------------------------
+# V0.3 C3: Focused Revision (design §33–§37)
+# ---------------------------------------------------------------------------
+
+
+class FocusedRevisionResult(BaseModel):
+    """Result of one focused revision targeting specific blocking issues.
+
+    The Author returns the complete updated proposal (delta persistence
+    is impractical in this architecture — design §36 permits the full
+    rewrite as the SERIALIZATION format) plus the structured focused
+    contract evidence: what was targeted, what scope was allowed, what
+    was preserved, what changed, and an issue-by-issue response against
+    each close condition.
+    """
+
+    proposal: DesignResult
+    target_issue_ids: list[str]
+    allowed_change_scope: list[str] = Field(default_factory=list)
+    preserved_invariants: list[str] = Field(default_factory=list)
+    changed_sections: list[str] = Field(default_factory=list)
+    issue_responses: list[AddressedIssue] = Field(default_factory=list)
+    acceptance_changes: list[str] = Field(default_factory=list)
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def _responses_required(self) -> "FocusedRevisionResult":
+        if not self.target_issue_ids:
+            raise ValueError("FocusedRevisionResult requires target_issue_ids")
+        responded = {r.issue_id for r in self.issue_responses}
+        missing = [i for i in self.target_issue_ids if i not in responded]
+        if missing:
+            raise ValueError(
+                f"FocusedRevisionResult must respond issue-by-issue; missing "
+                f"responses for: {', '.join(missing)}"
+            )
+        return self
+
+
 class AblationResult(BaseModel):
     proposal: DesignResult
     removed: list[str] = Field(default_factory=list)
@@ -538,6 +737,20 @@ class Issue(BaseModel):
     addressed_by: Optional[str] = None
     resolution: Optional[str] = None
     why_not_detected_initially: Optional[str] = None
+    # V0.3 C2: reviewer-recommended generic correction action. None
+    # means "no explicit recommendation" — the deterministic routing
+    # then applies the conservative default FULL_REVISION (the pre-V0.3
+    # behavior for unresolved engineering blockers).
+    correction_action: Optional[CorrectionAction] = None
+    # V0.3 C2 §31: descriptive focus dimension; never a workflow state.
+    focus_area: Optional[FocusArea] = None
+    # V0.3 C3: sections/components a focused fix of this issue may
+    # touch. Empty = semantic scope (no mechanical containment check).
+    change_scope: list[str] = Field(default_factory=list)
+    # V0.3 C4 §43/§45: why this issue appeared in a LATER review phase.
+    # None is legitimate only for INITIAL_REVIEW issues; ingest enforces
+    # presence for new BLOCKING issues from CLOSURE/FINAL review.
+    origin: Optional[NewIssueOrigin] = None
     # Orchestrator-owned routing metadata (V0.2): ACTIVE decision ids a
     # Human Authority Check proved to cover this issue's semantics.
     # Persisted with the issue so later phase-entry re-checks do not
@@ -554,15 +767,81 @@ class Issue(BaseModel):
         return self
 
 
+class AcceptanceCoverageEntry(BaseModel):
+    """V0.3 C4 §40: explicit accounting for one acceptance criterion.
+
+    The invariant is that acceptance criteria may not silently
+    disappear from review: a FAIL entry must name the BLOCKING issue
+    (by exact title) that carries the criterion in the same result.
+    """
+
+    criterion: str
+    status: str  # PASS | FAIL
+    issue_title: Optional[str] = None
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _coverage_shape(self) -> "AcceptanceCoverageEntry":
+        if self.status not in ("PASS", "FAIL"):
+            raise ValueError(
+                f"acceptance coverage status must be PASS or FAIL, "
+                f"got {self.status!r}"
+            )
+        if not self.criterion.strip():
+            raise ValueError("acceptance coverage criterion must be non-empty")
+        if self.status == "FAIL" and not (self.issue_title or "").strip():
+            raise ValueError(
+                f"acceptance criterion {self.criterion!r} marked FAIL must "
+                "reference the BLOCKING issue title that carries it"
+            )
+        return self
+
+
 class InitialReviewResult(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
+    # V0.3 C4 §39/§40: comprehensive review must explicitly account for
+    # every acceptance criterion derived from the contract.
+    acceptance_coverage: list[AcceptanceCoverageEntry] = Field(default_factory=list)
     summary: str = ""
+
+
+class CorrectionRecommendation(BaseModel):
+    """V0.3 C2: reviewer recommendation of the next correction step for
+    one unresolved blocking issue. The orchestrator routes
+    mechanically; unknown/malformed actions already failed closed at
+    the enum boundary."""
+
+    issue_id: str
+    correction_action: CorrectionAction
+    focus_area: Optional[FocusArea] = None
+    # C4 §46–49: structured material-progress assessment (required on
+    # outcomes of issues that already went through a correction
+    # attempt). PROGRESSED requires evidence in ``note`` — "looks
+    # better" prose is never sufficient (§49).
+    material_progress: Optional[MaterialProgress] = None
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _progress_note_shape(self) -> "CorrectionRecommendation":
+        if self.material_progress == MaterialProgress.PROGRESSED and not self.note.strip():
+            raise ValueError(
+                f"PROGRESSED for {self.issue_id} requires a note with the "
+                "structured evidence (close-condition delta / new evidence "
+                "/ narrowed scope)"
+            )
+        return self
 
 
 class IssueOutcome(BaseModel):
     issue_id: str
     resolution: str  # RESOLVED | UNRESOLVED
     note: str = ""
+    # V0.3 C2/C4: for UNRESOLVED outcomes the closure reviewer also
+    # recommends the next correction action and assesses material
+    # progress since the attempted correction.
+    correction_action: Optional[CorrectionAction] = None
+    focus_area: Optional[FocusArea] = None
+    material_progress: Optional[MaterialProgress] = None
 
 
 class ClosureReviewResult(BaseModel):
@@ -575,6 +854,14 @@ class FinalReviewResult(BaseModel):
     satisfies_requirement: bool = False
     unresolved_issue_ids: list[str] = Field(default_factory=list)
     issues: list[Issue] = Field(default_factory=list)
+    # V0.3 C4 §44: readiness review re-accounts every acceptance
+    # criterion from the initial review (completeness invariant).
+    acceptance_coverage: list[AcceptanceCoverageEntry] = Field(default_factory=list)
+    # V0.3 C2: next-step recommendations for the blockers listed in
+    # unresolved_issue_ids (defaults to FULL_REVISION when absent).
+    correction_recommendations: list[CorrectionRecommendation] = Field(
+        default_factory=list
+    )
     summary: str = ""
 
 

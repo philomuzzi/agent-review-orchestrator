@@ -147,8 +147,9 @@ def test_e20_markdown_follows_two_run_gate_lifecycle(repo):
 
 
 def test_e21_multiple_gates_independent_histories(repo):
-    # 4 discovered decisions -> gate 1 asks 3 (REQUIREMENT_TOO_AMBIGUOUS),
-    # after it closes intake re-runs and gate 2 asks the remaining one.
+    # V0.3 C5: 4 INDEPENDENT discovered decisions batch into ONE gate
+    # (cap 6) — the 20260914 chained same-second-gate pattern is gone.
+    # Multiple gates now only arise from dependency-based deferral.
     candidates = [candidate(question=f"Q{i}?") for i in range(1, 5)]
     pi = FakePiAdapter(script={"discover": [discovery_with_candidates(candidates)]})
     ui = ScriptedUI(answers=["1", "1", "1", "2"])
@@ -156,20 +157,18 @@ def test_e21_multiple_gates_independent_histories(repo):
     assert o.run() == int(ExitCode.DONE)
 
     log = load_log(o.store)
-    assert log.current.gate_id == "HG002"
-    assert len(log.gates) == 2
-    hg1 = next(g for g in log.gates if g.gate_id == "HG001")
-    hg2 = next(g for g in log.gates if g.gate_id == "HG002")
-    # Each gate kept its own full answer history and closed independently.
+    assert log.current.gate_id == "HG001"
+    assert len(log.gates) == 1
+    hg1 = log.gates[0]
+    # The single gate kept its full answer history and closed.
     assert hg1.status == GateStatus.CLOSED
-    assert hg2.status == GateStatus.CLOSED
-    assert len(hg1.answers) == 3
-    assert len(hg2.answers) == 1
-    assert hg1.answered_at != hg2.answered_at
-    # Four decisions applied from two independent gates.
+    assert len(hg1.questions) == 4
+    assert len(hg1.answers) == 4
+    # Four decisions applied from ONE interruption.
     decisions = o.store.load_decisions().decisions
     assert len(decisions) == 4
-    assert o.state.budgets.human_interruptions_used == 2
-    # current is the newest gate; the older one is unchanged history.
-    assert log.current.model_dump() == hg2.model_dump()
-    assert [a.raw for a in hg1.answers] == ["1", "1", "1"]
+    assert o.state.budgets.human_interruptions_used == 1
+    assert [a.raw for a in hg1.answers] == ["1", "1", "1", "2"]
+    events = [json.loads(l)["event"] for l in (o.store.dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "REQUIREMENT_TOO_AMBIGUOUS" not in events
+    assert "GATE_CANDIDATE_DEFERRED" not in events

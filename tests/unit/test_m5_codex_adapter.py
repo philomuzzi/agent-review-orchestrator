@@ -73,6 +73,7 @@ def test_all_review_prompts_render():
             repo="/repo",
             contract="{}",
             proposal="{}",
+            coverage="(no acceptance coverage recorded)",
             issues="[]",
             task_revision=1,
             schema="{}",

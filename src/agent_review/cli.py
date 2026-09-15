@@ -31,7 +31,16 @@ app = typer.Typer(
     "a Pi Author + Codex Reviewer + Human Gate workflow.",
 )
 
-SHOW_KINDS = ("final", "gate", "task", "proposal", "issues", "events", "handoff")
+SHOW_KINDS = (
+    "final",
+    "result",
+    "gate",
+    "task",
+    "proposal",
+    "issues",
+    "events",
+    "handoff",
+)
 
 
 def _package_version() -> str:
@@ -216,7 +225,14 @@ def _report(orchestrator, repo_path: Path) -> None:
         )
     if code == ExitCode.HUMAN_HANDOFF:
         reason = sanitize_line(state.handoff_reason or "task-level boundary reached")
-        _echo_exit(code, f"HUMAN_HANDOFF: {reason} (session: {session_dir})")
+        classification = (
+            f" [{state.result_status}]" if state.result_status else ""
+        )
+        _echo_exit(
+            code,
+            f"HUMAN_HANDOFF{classification}: {reason} "
+            f"(session: {session_dir}; result: {session_dir / 'session-result.md'})",
+        )
     if code == ExitCode.INTERRUPTED:
         _echo_exit(code, f"INTERRUPTED: resume with 'review resume {state.session_id}'")
     _echo_exit(code, f"FAILED: {sanitize_line(state.error or 'unexpected failure')}")
@@ -253,6 +269,10 @@ def status(
     typer.echo(f"task kind:      {state.task_kind.value}")
     typer.echo(f"phase:          {state.phase.value}")
     typer.echo(f"status:         {state.status.value}")
+    if state.result_status:
+        typer.echo(f"result:         {state.result_status}")
+    if state.scope_verdict:
+        typer.echo(f"scope verdict:  {state.scope_verdict}")
     typer.echo(f"task revision:  {state.task_revision}")
     typer.echo(f"review round:   {state.round}")
     typer.echo(f"active gate:    {state.active_gate or '-'}")
@@ -263,7 +283,8 @@ def status(
     b = state.budgets
     lim = state.limits
     typer.echo(
-        f"budgets:        revision {b.revision_used}/{lim.max_revision_rounds}, "
+        f"budgets:        full revision {b.revision_used}/{lim.max_revision_rounds}, "
+        f"focused revision {b.focused_revision_used}/{lim.max_focused_revision_rounds}, "
         f"ablation {b.ablation_used}/{lim.max_ablation_rounds}, "
         f"human gates {b.human_interruptions_used}/{lim.max_human_interruptions}, "
         f"protocol retries {b.protocol_retries_used}/{lim.max_protocol_retries}"
@@ -325,6 +346,7 @@ def show(
 
     files = {
         "final": "final.md",
+        "result": "session-result.md",
         "gate": "human-gate.md",
         "task": "task.md",
         "proposal": "proposal.md",

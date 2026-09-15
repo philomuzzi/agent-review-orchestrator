@@ -365,7 +365,22 @@ class RealCodexAdapter:
         contract: ChangeContract,
         proposal: DesignResult,
         issues: list[Issue],
+        acceptance_coverage: list | None = None,
     ) -> FinalReviewResult:
+        coverage_ctx = "(the initial review recorded no acceptance coverage)"
+        if acceptance_coverage:
+            lines = [
+                "## Acceptance criteria recorded by the initial review "
+                "(re-account each one)",
+                "",
+            ]
+            for entry in acceptance_coverage:
+                note = f" (initially {entry.status}"
+                if entry.issue_title:
+                    note += f", carried by '{entry.issue_title}'"
+                note += ")"
+                lines.append(f"- {entry.criterion}{note}")
+            coverage_ctx = "\n".join(lines)
         prompt = render_prompt(
             "final_review",
             request=state.request,
@@ -374,6 +389,7 @@ class RealCodexAdapter:
             proposal=_json_compact(json.loads(proposal.model_dump_json())),
             issues=_json_compact([json.loads(i.model_dump_json()) for i in issues]),
             task_revision=state.task_revision,
+            coverage=coverage_ctx,
             schema=_json_compact(FinalReviewResult.model_json_schema()),
         )
         return self._call("final_review", prompt, FinalReviewResult)

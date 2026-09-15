@@ -27,6 +27,7 @@ def run(o) -> ExitCode | None:
         o.fail("REVISION reached with revision budget exhausted")
         return int(ExitCode.FAILED)
     o.state.budgets.revision_used += 1
+    o.state.last_correction_action = "FULL_REVISION"
     o.event("REVISION_STARTED", round=o.state.round)
 
     contract = o.store.load_contract()

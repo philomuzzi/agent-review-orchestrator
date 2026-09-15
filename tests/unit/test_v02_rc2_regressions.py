@@ -154,8 +154,9 @@ def cannot_determine_result(issue_id="R001"):
 
 
 def final_review_script(*new_issues, satisfies=False, unresolved=()):
-    """FINAL_REVIEW result raising new blockers (closure restrictions
-    require why_not_detected_initially for non-REGRESSION BLOCKING)."""
+    """FINAL_REVIEW result raising new blockers. V0.3: late BLOCKING
+    issues must carry origin (PREVIOUS_REVIEW_MISS +
+    why_not_detected_initially) or the ingest downgrades them."""
     issues = []
     for issue in new_issues:
         data = issue.model_dump(mode="json") if hasattr(issue, "model_dump") else dict(issue)
@@ -163,6 +164,7 @@ def final_review_script(*new_issues, satisfies=False, unresolved=()):
             data.get("why_not_detected_initially")
             or "the semantic gap only became visible after ablation reshaped the design"
         )
+        data["origin"] = data.get("origin") or "PREVIOUS_REVIEW_MISS"
         issues.append(data)
     return json.dumps(
         {
@@ -175,13 +177,18 @@ def final_review_script(*new_issues, satisfies=False, unresolved=()):
 
 
 def closure_script(resolved: bool, issue_ids=("R001",)):
+    """Closure outcome script. V0.3: an UNRESOLVED outcome recommends the
+    next correction explicitly (ABLATION — the over-design simplification
+    this fixture represents) so the flow legitimately continues to
+    ABLATION/FINAL_REVIEW instead of relying on the removed auto-fallback."""
     return json.dumps(
         {
             "issue_outcomes": [
                 {
                     "issue_id": i,
                     "resolution": "RESOLVED" if resolved else "UNRESOLVED",
-                    "note": "verified" if resolved else "not verified",
+                    "note": "verified" if resolved else "over-design; simplify to the minimum sufficient design",
+                    **({"correction_action": "ABLATION"} if not resolved else {}),
                 }
                 for i in issue_ids
             ],
@@ -278,15 +285,18 @@ def test_b201a_final_review_covered_but_budgets_exhausted_is_budget_handoff(repo
     code = o.run()
     assert code == int(ExitCode.HUMAN_HANDOFF)
     reason = o.state.handoff_reason or ""
-    # The handoff is budget-driven, and the covered routing still ran.
-    assert "convergence budget exhausted" in reason
-    assert "REQUIREMENT" not in reason
+    # V0.3: the stop is budget-driven AND classified as a precise
+    # engineering conclusion — never a category-driven NEEDS_HUMAN one.
+    assert "correction stopped" in reason
+    assert "no recommended corrective action has remaining budget" in reason
+    assert o.state.result_status == "DESIGN_NOT_APPROVED"
     events = events_of(o)
     assert any(
         e["event"] == "ISSUE_COVERED_BY_DECISION" and e["issue_id"] == "R002"
         for e in events
     )
     assert (o.store.dir / "handoff.md").is_file()
+    assert (o.store.dir / "session-result.md").is_file()
 
 
 # --- 2+3. B201-B: FINAL_REVIEW new decision -> Convergence Gate -> rebuild ---

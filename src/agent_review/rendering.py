@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from agent_review.models import (
     AblationResult,
+    AcceptanceCoverageEntry,
     ChangeContract,
     Decision,
     DesignResult,
@@ -18,6 +19,8 @@ from agent_review.models import (
     Issue,
     IssueSeverity,
     IssueStatus,
+    ResultStatus,
+    ScopeAssessment,
     SessionState,
 )
 
@@ -250,6 +253,11 @@ def render_handoff(
     active = [d for d in decisions if d.status.value == "ACTIVE"]
 
     parts = ["# Human Handoff", "", _section("Why the workflow stopped", reason)]
+    # V0.3 C1: the user-facing result classification is authoritative for
+    # "what kind of stop is this"; handoff.md stays for compatibility.
+    result_status = getattr(state, "result_status", None)
+    if result_status:
+        parts.append(_section("Result classification", result_status))
 
     decide_lines: list[str] = []
     for i in blocking:
@@ -343,6 +351,286 @@ def render_handoff(
         )
     parts.append(_section("Recommended next action", next_action))
     return "\n".join(parts)
+
+
+def render_scope_assessment(result: ScopeAssessment) -> str:
+    """V0.3 C0: human-readable projection of the scope assessment."""
+    parts = [
+        "# Scope Assessment",
+        "",
+        _section("Verdict", result.verdict.value),
+        _section("Primary Outcome", result.primary_outcome),
+        _section("Independent Outcomes", _bullets(result.independent_outcomes)),
+        _section("Decision Clusters", _bullets(result.decision_clusters)),
+        _section("Change Surfaces", _bullets(result.change_surfaces)),
+        _section("External Unknowns", _bullets(result.external_unknowns)),
+        _section("Rationale", result.rationale),
+    ]
+    if result.uncertainty.strip():
+        parts.append(
+            _section(
+                "Classification Uncertainty",
+                result.uncertainty
+                + "\n\n(Per the scope-control principle the verdict above was "
+                "classified conservatively rather than guessing a "
+                "Requirement decision.)",
+            )
+        )
+    if result.decomposition:
+        lines: list[str] = []
+        for index, child in enumerate(result.decomposition, 1):
+            lines.append(f"### Session {chr(ord('A') + index - 1)} — {child.title}")
+            lines.append(f"- goal: {child.goal}")
+            lines.append("- inputs:")
+            lines.extend(f"  - {item}" for item in child.inputs or ["(none)"])
+            lines.append("- non-goals:")
+            lines.extend(f"  - {item}" for item in child.non_goals or ["(none)"])
+            lines.append("- depends on:")
+            lines.extend(f"  - {item}" for item in child.dependencies or ["(none)"])
+            lines.append("")
+        parts.append(_section("Decomposition Proposal", lines))
+    return "\n".join(parts)
+
+
+def render_session_result(store, state: SessionState, status: ResultStatus) -> str:
+    """V0.3 C1: deterministic terminal result (design §22/§23).
+
+    Rendered ONLY from persisted artifacts — no additional Agent call.
+    Irrelevant sections are omitted per the design; every session that
+    stopped answers: what is decided, the current recommended solution,
+    what remains unresolved, whether implementation can start, why the
+    workflow stopped and what should happen next.
+    """
+    issues = store.load_issues().issues
+    decisions = store.load_decisions().decisions
+    scope = store.load_scope_assessment()
+    contract = store.load_contract()
+    proposal = store.load_proposal()
+    # The archived history keeps the last STALE proposal; the active
+    # proposal is the current recommendation when present.
+    proposal_json = store.read_text("proposal.json")
+    has_proposal = proposal_json is not None
+
+    resolved = [
+        i for i in issues
+        if i.status == IssueStatus.RESOLVED and i.severity == IssueSeverity.BLOCKING
+    ]
+    remaining_blocking = [
+        i
+        for i in issues
+        if i.severity == IssueSeverity.BLOCKING
+        and i.status in (IssueStatus.OPEN, IssueStatus.ADDRESSED, IssueStatus.NEED_HUMAN)
+    ]
+    remaining_non_blocking = [
+        i
+        for i in issues
+        if i.severity == IssueSeverity.NON_BLOCKING
+        and i.status != IssueStatus.SUPERSEDED
+    ]
+    active_decisions = [d for d in decisions if d.status.value == "ACTIVE"]
+
+    why_stopped = (
+        state.handoff_reason
+        or state.error
+        or "workflow completed"
+    )
+    parts = [
+        "# Session Result",
+        "",
+        _section(
+            "Status",
+            f"**{status.value}**"
+            + (
+                f"  \u00b7 internal state: {state.phase.value}"
+                if state.phase.value != status.value
+                else ""
+            ),
+        ),
+        _section(
+            "Summary",
+            [
+                f"- session: {state.session_id}",
+                f"- task: {state.task_title or state.request[:80]}",
+                f"- request: {(state.request[:200] + '...') if len(state.request) > 200 else state.request}",
+                f"- task kind: {state.task_kind.value}",
+                f"- why the workflow stopped: {why_stopped}",
+                f"- budgets: full revision {state.budgets.revision_used}/{state.limits.max_revision_rounds}, "
+                f"focused revision {state.budgets.focused_revision_used}/{state.limits.max_focused_revision_rounds}, "
+                f"ablation {state.budgets.ablation_used}/{state.limits.max_ablation_rounds}, "
+                f"human interruptions {state.budgets.human_interruptions_used}/{state.limits.max_human_interruptions}",
+            ],
+        ),
+    ]
+
+    if scope is not None:
+        scope_lines = [
+            f"- verdict: {scope.verdict.value}",
+            f"- primary outcome: {scope.primary_outcome or '-'}",
+        ]
+        if scope.independent_outcomes:
+            scope_lines.append(
+                "- independent outcomes: " + "; ".join(scope.independent_outcomes)
+            )
+        scope_lines.append(f"- rationale: {scope.rationale}")
+        if scope.uncertainty.strip():
+            scope_lines.append(f"- classification uncertainty: {scope.uncertainty}")
+        parts.append(_section("Scope Assessment", scope_lines))
+
+    # Current Recommended Design — the latest proposal with an explicit
+    # approval caveat when the session did not converge to APPROVED.
+    if has_proposal:
+        design_lines: list[str] = []
+        if proposal is not None:
+            design_lines.append(proposal.summary)
+            design_lines.append("")
+            design_lines.append(f"- full design: proposal.md (task revision {proposal.based_on_task_revision})")
+        else:
+            design_lines.append(
+                "- the latest proposal is STALE (a Human decision changed the "
+                "design basis after it was produced); see history/ for the "
+                "archived designs"
+            )
+        if status != ResultStatus.APPROVED:
+            design_lines.append(
+                "- NOT approved: this design still has unresolved blocking "
+                "issues (see below); do not implement as-is"
+            )
+        parts.append(_section("Current Recommended Design", design_lines))
+    else:
+        parts.append(
+            _section("Current Recommended Design", "(no design produced — the workflow stopped before DESIGN)")
+        )
+
+    decision_lines = []
+    for d in active_decisions:
+        if d.source.value == "CUSTOM":
+            decision_lines.append(
+                f"- [{d.decision_key}] {d.question} -> **(human-defined)** {d.answer_text}"
+            )
+        else:
+            decision_lines.append(
+                f"- [{d.decision_key}] {d.question} -> **{d.selected_option_key or '-'}** ({d.answer_text})"
+            )
+    if decision_lines:
+        parts.append(_section("Frozen Human Decisions", decision_lines))
+
+    resolved_lines = [
+        f"- {i.id}: {i.title} — {i.resolution or 'verified'}"
+        for i in resolved
+    ]
+    if resolved_lines:
+        parts.append(_section("Resolved Issues", resolved_lines))
+
+    if remaining_blocking:
+        blocker_lines: list[str] = []
+        for i in remaining_blocking:
+            blocker_lines.append(
+                f"### {i.id} [{i.category.value} / {i.status.value}]{' / ' + i.origin.value if i.origin else ''} {i.title}"
+            )
+            blocker_lines.append(f"- problem: {i.problem or '-'}")
+            if i.acceptance:
+                blocker_lines.append("- close conditions: " + "; ".join(i.acceptance))
+            if i.covered_by_decisions:
+                blocker_lines.append(
+                    "- semantics already decided by: "
+                    + ", ".join(i.covered_by_decisions)
+                    + " (engineering gap, not a missing Human decision)"
+                )
+            if i.resolution:
+                blocker_lines.append(f"- latest reviewer note: {i.resolution}")
+            if i.correction_action:
+                focus = f" / {i.focus_area.value}" if i.focus_area else ""
+                blocker_lines.append(
+                    f"- reviewer-recommended correction: {i.correction_action.value}{focus}"
+                )
+            blocker_lines.append("")
+        parts.append(_section("Remaining Blocking Issues", blocker_lines))
+
+    if remaining_non_blocking:
+        parts.append(
+            _section(
+                "Remaining Non-Blocking Issues",
+                [
+                    f"- {i.id} [{i.status.value}]: {i.title} — {i.problem}"
+                    for i in remaining_non_blocking
+                ],
+            )
+        )
+
+    # Implementation Readiness (design §16).
+    if status == ResultStatus.APPROVED:
+        readiness = [
+            "**READY** — review passed with no blocking issue remaining; "
+            "implement from final.md."
+        ]
+    elif status in (ResultStatus.DESIGN_NOT_APPROVED, ResultStatus.NEEDS_HUMAN_DECISION):
+        readiness = [
+            "**NOT_READY** — blocking issues remain (see above)."
+        ]
+    else:
+        readiness = None  # decomposition / out-of-scope: readiness not applicable
+    if readiness is not None:
+        parts.append(_section("Implementation Readiness", readiness))
+
+    # Decomposition Proposal (DECOMPOSITION_REQUIRED only).
+    if scope is not None and scope.decomposition:
+        lines = []
+        for index, child in enumerate(scope.decomposition, 1):
+            lines.append(f"### Session {chr(ord('A') + index - 1)} — {child.title}")
+            lines.append(f"- goal: {child.goal}")
+            lines.append("- inputs:")
+            lines.extend(f"  - {item}" for item in child.inputs or ["(none)"])
+            lines.append("- non-goals:")
+            lines.extend(f"  - {item}" for item in child.non_goals or ["(none)"])
+            lines.append("- depends on:")
+            lines.extend(f"  - {item}" for item in child.dependencies or ["(none)"])
+            lines.append("")
+        lines.append(
+            "Run each child session as a SEPARATE `review` request carrying its "
+            "inputs and the Frozen Human Decisions above; child sessions are "
+            "NOT executed automatically."
+        )
+        parts.append(_section("Decomposition Proposal", lines))
+
+    parts.append(_section("Recommended Next Action", _next_action(state, status)))
+    return "\n".join(parts)
+
+
+def _next_action(state: SessionState, status: ResultStatus) -> list[str]:
+    if status == ResultStatus.APPROVED:
+        return ["Implement from final.md; non-blocking suggestions are optional."]
+    if status == ResultStatus.DECOMPOSITION_REQUIRED:
+        return [
+            "Split the work along the Decomposition Proposal above and start "
+            "the first child session as a new `review` request (state this "
+            "result and the Frozen Human Decisions as its inputs)."
+        ]
+    if status == ResultStatus.OUT_OF_SCOPE:
+        return [
+            "This request falls outside the supported product scope "
+            "(bounded engineering changes in an existing repository); "
+            "re-scope the request to a bounded change or use another tool."
+        ]
+    if status == ResultStatus.NEEDS_HUMAN_DECISION:
+        return [
+            "A Human Requirement/Fact decision is genuinely required. State "
+            "the decision(s) directly in a new `review` request — or answer "
+            "the pending gate questions listed above — then rerun; the "
+            "remaining engineering work continues from the Frozen Human "
+            "Decisions and Remaining Blocking Issues sections."
+        ]
+    if status == ResultStatus.DESIGN_NOT_APPROVED:
+        return [
+            "Requirement authority is settled (see Frozen Human Decisions); "
+            "the remaining blockers are engineering gaps. Start a follow-up "
+            "session whose request carries each remaining blocker's close "
+            "conditions as hard inputs, or fix the design directly from "
+            "proposal.md + the Remaining Blocking Issues section."
+        ]
+    return [
+        "Runtime/protocol failure — inspect state.json and events.jsonl; "
+        "`review resume` retries the failed phase boundary."
+    ]
 
 
 def render_final(

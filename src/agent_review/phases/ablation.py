@@ -24,6 +24,7 @@ def run(o) -> ExitCode | None:
         o.fail("ABLATION reached with ablation budget exhausted")
         return int(ExitCode.FAILED)
     o.state.budgets.ablation_used += 1
+    o.state.last_correction_action = "ABLATION"
     o.event("ABLATION_STARTED", round=o.state.round)
 
     contract = o.store.load_contract()

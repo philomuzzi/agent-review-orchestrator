@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_review.models import ExitCode, Phase, TaskKind
+from agent_review.models import ExitCode, Phase
 from agent_review.rendering import render_discovery
 
 
@@ -36,8 +36,8 @@ def run(o) -> ExitCode | None:
         task_kind=o.state.task_kind.value,
         components=len(result.relevant_components),
     )
-    if o.state.task_kind == TaskKind.PROBLEM:
-        o.transition(Phase.INVESTIGATE)
-    else:
-        o.transition(Phase.INTAKE)
+    # V0.3 C0: repository discovery is always followed by the scope
+    # guard — no path bypasses the single-session suitability check
+    # into solutioning.
+    o.transition(Phase.SCOPE_GUARD)
     return None

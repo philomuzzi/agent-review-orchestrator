@@ -119,8 +119,11 @@ def test_final_retains_every_design_and_change_map_field(repo):
 @pytest.mark.parametrize('crash_phase', [Phase.INITIAL_REVIEW, Phase.REVISION, Phase.CLOSURE_REVIEW, Phase.ABLATION, Phase.FINAL_REVIEW])
 def test_crash_after_phase_outputs_rolls_back_entire_boundary(repo, monkeypatch, crash_phase):
     issue = make_blocking_issue(1).model_dump(mode='json')
+    # V0.3: ABLATION routes only on an explicit reviewer recommendation
+    # (never as the default fallback after failed revision), so the
+    # scripted closure outcome must recommend it to drive the flow there.
     codex = FakeCodexAdapter({'initial_review': [json.dumps({'issues': [issue]})],
-                             'closure_review': [json.dumps({'issue_outcomes': [{'issue_id': 'R001', 'resolution': 'UNRESOLVED'}]})]})
+                             'closure_review': [json.dumps({'issue_outcomes': [{'issue_id': 'R001', 'resolution': 'UNRESOLVED', 'note': 'over-design; simplify to satisfy the requirement', 'correction_action': 'ABLATION'}]})]})
     o = make(repo, codex=codex)
     while o.state.phase != crash_phase:
         o.step()

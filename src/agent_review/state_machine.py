@@ -10,7 +10,17 @@ from agent_review.models import Phase, SessionStatus
 
 ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.INIT: {Phase.DISCOVER},
-    Phase.DISCOVER: {Phase.INTAKE, Phase.INVESTIGATE},
+    # V0.3 C0: repository discovery is always followed by the scope
+    # guard; no path bypasses it into solutioning.
+    Phase.DISCOVER: {Phase.SCOPE_GUARD},
+    Phase.SCOPE_GUARD: {
+        Phase.INTAKE,
+        Phase.INVESTIGATE,
+        # DECOMPOSITION_REQUIRED / OUT_OF_SCOPE terminate here —
+        # internally a task-level boundary; the user-facing result
+        # status carries the classification (design §56).
+        Phase.HUMAN_HANDOFF,
+    },
     Phase.INVESTIGATE: {Phase.INTAKE, Phase.WAITING_FOR_HUMAN, Phase.HUMAN_HANDOFF},
     Phase.INTAKE: {Phase.WAITING_FOR_HUMAN, Phase.DESIGN, Phase.HUMAN_HANDOFF},
     Phase.WAITING_FOR_HUMAN: {
@@ -18,6 +28,7 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
         Phase.INVESTIGATE,
         Phase.DESIGN,
         Phase.REVISION,
+        Phase.FOCUSED_REVISION,
         Phase.INTERRUPTED,
         Phase.HUMAN_HANDOFF,
         Phase.FAILED,
@@ -25,6 +36,7 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.DESIGN: {Phase.INITIAL_REVIEW},
     Phase.INITIAL_REVIEW: {
         Phase.REVISION,
+        Phase.FOCUSED_REVISION,
         Phase.ABLATION,
         Phase.FINALIZE,
         Phase.WAITING_FOR_HUMAN,
@@ -38,8 +50,17 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
         Phase.WAITING_FOR_HUMAN,
         Phase.HUMAN_HANDOFF,
     },
+    # V0.3 C3: focused correction of a bounded part of an otherwise
+    # valid design. Closure review verifies the focused fix, exactly as
+    # it verifies a full revision — the Author never verifies itself.
+    Phase.FOCUSED_REVISION: {
+        Phase.CLOSURE_REVIEW,
+        Phase.WAITING_FOR_HUMAN,
+        Phase.HUMAN_HANDOFF,
+    },
     Phase.CLOSURE_REVIEW: {
         Phase.REVISION,
+        Phase.FOCUSED_REVISION,
         Phase.ABLATION,
         Phase.FINALIZE,
         Phase.WAITING_FOR_HUMAN,
@@ -59,6 +80,7 @@ ALLOWED_TRANSITIONS: dict[Phase, set[Phase]] = {
         # correction budget instead of terminating by category alone.
         Phase.WAITING_FOR_HUMAN,
         Phase.REVISION,
+        Phase.FOCUSED_REVISION,
         Phase.ABLATION,
         Phase.HUMAN_HANDOFF,
     },

@@ -25,7 +25,7 @@ review --name "同步任务暂停" "request"        # explicit presentation titl
 review resume [session-id]                   # resume interrupted / gate sessions
 review status [session-id]                   # phase, blockers, budgets
 review status --list                         # recent sessions (id, title, outcome)
-review show [final|gate|task|proposal|issues|events|handoff] [session-id]
+review show [final|result|gate|task|proposal|issues|events|handoff] [session-id]
 review --version                             # package version
 ```
 
@@ -94,8 +94,8 @@ explicitly.
 
 | Code | Meaning |
 |------|---------|
-| 0    | DONE — `final.md` written |
-| 10   | HUMAN_HANDOFF — task-level boundary (budget exhausted, unresolved fact, real trade-off, undeterminable authority); see `handoff.md` |
+| 0    | DONE — `final.md` + `session-result.md` (APPROVED) written |
+| 10   | Terminal boundary — see `session-result.md` for the classification: DESIGN_NOT_APPROVED / NEEDS_HUMAN_DECISION / DECOMPOSITION_REQUIRED / OUT_OF_SCOPE |
 | 20   | WAITING_FOR_HUMAN — gate packet persisted, needs answers |
 | 30   | FAILED — tooling/protocol failure (fails closed) |
 | 130  | INTERRUPTED — Ctrl+C; resume with `review resume` |
@@ -103,14 +103,28 @@ explicitly.
 ## Workflow
 
 ```text
-request → DISCOVER → [INVESTIGATE for problem mode] → INTAKE (Change Contract)
-→ [Human Gate only when required] → DESIGN → INITIAL_REVIEW
+request → DISCOVER → SCOPE GUARD (V0.3)
+├─ DECOMPOSITION_REQUIRED → stops BEFORE DESIGN + decomposition proposal
+├─ OUT_OF_SCOPE → stops + unsupported reason
+└─ BOUNDED → [INVESTIGATE for problem mode] → INTAKE (Change Contract)
+→ [Human Gate only when required; independent questions batch (V0.3)] → DESIGN → INITIAL_REVIEW
 → [Human Authority Check on blocking REQUIREMENT/FACT issues]
-→ REVISION if blocked → CLOSURE_REVIEW → ABLATION if unresolved
-→ FINAL_REVIEW → FINALIZE → final.md
+→ correction by REVIEWER-RECOMMENDED action (V0.3 generic routing):
+   FULL_REVISION / FOCUSED_REVISION / ABLATION (explicit only) / HUMAN_DECISION / STOP
+→ CLOSURE_REVIEW (differential; material-progress assessment)
+→ FINAL_REVIEW (readiness; acceptance completeness) → FINALIZE → final.md
    (a genuinely new Human decision found in review opens a Convergence
     Gate and rebuilds the task basis in the same session)
 ```
+
+Every terminal session writes `session-result.md` (V0.3) — the primary
+human-facing artifact — plus `telemetry.json`. Result statuses:
+`APPROVED`, `DESIGN_NOT_APPROVED` (engineering conclusion; authority
+settled), `NEEDS_HUMAN_DECISION` (genuine new Human authority required),
+`DECOMPOSITION_REQUIRED`, `OUT_OF_SCOPE`, `FAILED`. Internal workflow
+state and user-facing classification are separate concepts; e.g. an
+internal `HUMAN_HANDOFF` may classify as `DESIGN_NOT_APPROVED`.
+Inspect with `review show result [session-id]`.
 
 Core rules (full contracts in [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEMENTATION_SPEC.md)):
 
@@ -120,8 +134,11 @@ Core rules (full contracts in [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEME
 - Codex raises structured issues; the orchestrator computes PASS mechanically.
 - A blocking REQUIREMENT/FACT issue is checked against your ACTIVE decisions
   before any Human interruption or handoff (V0.2).
+- Agents RECOMMEND generic correction actions; the deterministic orchestrator
+  controls execution (V0.3). ABLATION is never the default fallback.
 - Pi may mark an issue ADDRESSED; only Codex verifies RESOLVED.
-- Budgets are hard limits (1 revision, 1 ablation, 2 human interruptions, 1 protocol repair).
+- Budgets are hard limits (full revision 1, focused revision 1, ablation 1,
+  2 human interruptions, 1 protocol repair).
 - A human decision that changes the design basis bumps `task_revision`; the old
   proposal goes to `history/` marked STALE and the session redesigns.
 
@@ -131,13 +148,21 @@ Core rules (full contracts in [`docs/V0_IMPLEMENTATION_SPEC.md`](docs/V0_IMPLEME
 V0    Fixed Agent Workflow
 V0.1  Runtime Progress Visibility / Session Presentation
 V0.2  Human Decision & Convergence
-V0.3  Workflow Telemetry
+V0.3  Convergence Quality
 V0.5  Role-Based Agent Assignment
 V0.7  Multi Reviewer
 V1    Capability-Based Agent Routing
 ```
 
-V0.2 was promoted from a reserved slot after real Shopify workflow evidence showed two prerequisite gaps: a Human could only choose Agent-proposed options, and downstream `NEED_HUMAN` review issues could terminate the session even when the required semantics were already decided or could have been resolved through another bounded Human Gate. See [`docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md`](docs/V0_2_HUMAN_DECISION_CONVERGENCE_SPEC.md).
+V0.3 was promoted from the telemetry slot after two real 20260914 sessions
+both ended in ambiguous `HUMAN_HANDOFF`: a composite task that should never
+have entered a single session, and a bounded task whose settled-authority
+engineering blocker burned the whole correction ladder. V0.3 adds the Scope
+Guard, the Terminal Result Contract, generic correction actions (incl.
+Focused Revision), the Review Convergence Contract and Human Gate batching;
+telemetry collection ships as part of it. See
+[`docs/V0_3_CONVERGENCE_QUALITY_DESIGN.md`](docs/V0_3_CONVERGENCE_QUALITY_DESIGN.md)
+and [`docs/V0_3_IMPLEMENTATION_AUDIT.md`](docs/V0_3_IMPLEMENTATION_AUDIT.md).
 
 ## Session state
 
@@ -145,14 +170,16 @@ Everything lands under the target repository:
 
 ```text
 <repo>/.review/<session-id>/
-├── input.md, discovery.md, investigation.md
+├── input.md, discovery.md, scope-assessment.md (V0.3), investigation.md
 ├── task.md + task.json          # Change Contract
 ├── proposal.md + proposal.json  # current design
 ├── change-map.json, issues.json, decisions.json
+├── acceptance-coverage.json     # V0.3: criteria recorded at initial review
 ├── human-gate.json + human-gate.md   # gate truth (current/history agree)
 ├── state.json                   # authoritative phase/budget state
-├── ablation.md, final.md
-├── handoff.md                   # written on HUMAN_HANDOFF (V0.2)
+├── ablation.md, focused-revision.md (V0.3), final.md
+├── session-result.md + telemetry.json  # V0.3 terminal result + metrics
+├── handoff.md                   # written on terminal boundaries
 ├── events.jsonl                 # audit trail
 ├── raw/                         # pi-*.jsonl / codex-*.jsonl agent I/O
 └── history/                     # STALE proposals
@@ -190,7 +217,8 @@ binary = "codex"
 model = ""
 
 [budgets]
-revision = 1
+revision = 1              # FULL_REVISION budget
+focused_revision = 1      # FOCUSED_REVISION budget (V0.3)
 ablation = 1
 human_interruptions = 2
 protocol_retries = 1

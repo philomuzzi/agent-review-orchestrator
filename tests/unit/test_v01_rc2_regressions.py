@@ -403,6 +403,9 @@ def test_closure_regression_never_renders_unqualified_success(repo):
 
     regression = make_blocking_issue(9, title="regression introduced by fix")
     regression.category = IssueCategory.REGRESSION
+    from agent_review.models import CorrectionAction
+
+    regression.correction_action = CorrectionAction.FOCUSED_REVISION
     codex = FakeCodexAdapter(
         script={
             "initial_review": [
@@ -432,7 +435,8 @@ def test_closure_regression_never_renders_unqualified_success(repo):
         ui=NonInteractiveUI(),
         renderer=renderer,
     )
-    assert o.run() == int(ExitCode.DONE)  # ablation -> final review closes it
+    assert o.run() == int(ExitCode.DONE)  # focused revision -> closure closes it
+    assert o.state.budgets.ablation_used == 0
     events = _load_events(o.store)
     closure = next(e for e in events if e["event"] == "CLOSURE_REVIEW_COMPLETED")
     assert closure["resolved"] == 1 and closure["new_blocking"] == 1
@@ -492,7 +496,12 @@ def test_final_review_verdict_never_overstates_pass(repo):
                 json.dumps(
                     {
                         "issue_outcomes": [
-                            {"issue_id": "R001", "resolution": "UNRESOLVED", "note": "no"}
+                            {
+                                "issue_id": "R001",
+                                "resolution": "UNRESOLVED",
+                                "note": "over-design; ablate to the minimum sufficient design",
+                                "correction_action": "ABLATION",
+                            }
                         ],
                         "new_issues": [],
                         "summary": "not verified",
@@ -547,7 +556,12 @@ def test_final_review_pass_renders_satisfied(repo):
                 json.dumps(
                     {
                         "issue_outcomes": [
-                            {"issue_id": "R001", "resolution": "UNRESOLVED", "note": "no"}
+                            {
+                                "issue_id": "R001",
+                                "resolution": "UNRESOLVED",
+                                "note": "over-design; simplify to the minimum sufficient design",
+                                "correction_action": "ABLATION",
+                            }
                         ],
                         "new_issues": [],
                         "summary": "not verified",

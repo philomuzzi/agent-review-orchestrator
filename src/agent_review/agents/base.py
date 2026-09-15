@@ -16,10 +16,12 @@ from agent_review.models import (
     DesignResult,
     DiscoveryResult,
     FinalReviewResult,
+    FocusedRevisionResult,
     InitialReviewResult,
     ClosureReviewResult,
     InvestigationResult,
     RevisionResult,
+    ScopeAssessment,
     SessionState,
 )
 
@@ -140,9 +142,11 @@ def run_with_protocol_repair(
 # names so V0.3 aggregation never splits one logical phase into two values.
 CANONICAL_PHASE_NAMES = {
     "discover": "DISCOVER",
+    "scope_guard": "SCOPE_GUARD",
     "investigate": "INVESTIGATE",
     "design": "DESIGN",
     "revise": "REVISION",
+    "focused_revise": "FOCUSED_REVISION",
     "ablate": "ABLATION",
     "initial_review": "INITIAL_REVIEW",
     "closure_review": "CLOSURE_REVIEW",
@@ -196,6 +200,7 @@ def protocol_retry_reporter(
 
 class PiAdapter(Protocol):
     def discover(self, state: SessionState) -> DiscoveryResult: ...
+    def scope_guard(self, state: SessionState, discovery: DiscoveryResult) -> "ScopeAssessment": ...
     def investigate(self, state: SessionState, discovery=None, decisions=None) -> InvestigationResult: ...
     def design(
         self, state: SessionState, contract: ChangeContract, discovery=None
@@ -207,6 +212,14 @@ class PiAdapter(Protocol):
         proposal: DesignResult,
         issues: list,
     ) -> RevisionResult: ...
+    def focused_revise(
+        self,
+        state: SessionState,
+        contract: ChangeContract,
+        proposal: DesignResult,
+        issues: list,
+        allowed_change_scope: list[str],
+    ) -> "FocusedRevisionResult": ...
     def ablate(
         self,
         state: SessionState,
@@ -234,5 +247,6 @@ class CodexAdapter(Protocol):
         contract: ChangeContract,
         proposal: DesignResult,
         issues: list,
+        acceptance_coverage: list | None = None,
     ) -> FinalReviewResult: ...
     def abort(self) -> None: ...

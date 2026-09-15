@@ -23,6 +23,7 @@ from agent_review.models import (
     DesignResult,
     DiscoveryResult,
     FinalReviewResult,
+    FocusedRevisionResult,
     HumanAuthorityCheckResult,
     InitialReviewResult,
     InvestigationResult,
@@ -32,6 +33,8 @@ from agent_review.models import (
     IssueSeverity,
     RevisionResult,
     RootCauseStatus,
+    ScopeAssessment,
+    ScopeVerdict,
     SessionState,
 )
 
@@ -48,6 +51,53 @@ def default_discovery(state: SessionState) -> DiscoveryResult:
         change_surface=["src/"],
         unknowns=[],
         human_candidates=[],
+    )
+
+
+def default_scope_assessment(state: SessionState) -> ScopeAssessment:
+    """Deterministic default: BOUNDED (V0.3 C0).
+
+    Unscripted fake runs keep flowing into the normal workflow exactly
+    like V0.2; tests that want a scope verdict script ``scope_guard``.
+    """
+    return ScopeAssessment(
+        verdict=ScopeVerdict.BOUNDED,
+        primary_outcome=(
+            state.request.strip()[:120] or "the requested bounded change"
+        ),
+        independent_outcomes=[],
+        change_surfaces=[],
+        external_unknowns=[],
+        rationale=(
+            "fake adapter default: single primary outcome, one coherent "
+            "change surface — treated as one bounded session"
+        ),
+    )
+
+
+def default_focused_revision(
+    contract: ChangeContract,
+    proposal: DesignResult,
+    issues: list[Issue],
+    allowed_change_scope: list[str],
+) -> FocusedRevisionResult:
+    addressed = [
+        {"issue_id": i.id, "how_addressed": f"Focused fix applied for {i.title}."}
+        for i in issues
+    ]
+    revised = proposal.model_copy(deep=True)
+    revised.summary = f"Focused revised design: {contract.user_intent}"
+    return FocusedRevisionResult(
+        proposal=revised,
+        target_issue_ids=[i.id for i in issues],
+        allowed_change_scope=list(allowed_change_scope),
+        preserved_invariants=[
+            "ACTIVE Human Decisions preserved unchanged",
+            "explicitly unchanged sections preserved",
+        ],
+        changed_sections=list(allowed_change_scope),
+        issue_responses=addressed,
+        notes="fake adapter default focused revision",
     )
 
 
@@ -222,6 +272,13 @@ class FakePiAdapter(ScriptedAdapter):
             "discover", lambda: default_discovery(state), DiscoveryResult
         )
 
+    def scope_guard(self, state: SessionState, discovery=None) -> ScopeAssessment:
+        return self._run(
+            "scope_guard",
+            lambda: default_scope_assessment(state),
+            ScopeAssessment,
+        )
+
     def human_authority_check(self, state, issues, decisions, contract=None):
         return self._run(
             "human_authority_check",
@@ -257,6 +314,24 @@ class FakePiAdapter(ScriptedAdapter):
             return r
 
         return self._run("revise", build, RevisionResult)
+
+    def focused_revise(
+        self,
+        state: SessionState,
+        contract: ChangeContract,
+        proposal: DesignResult,
+        issues: list[Issue],
+        allowed_change_scope: list[str] | None = None,
+        preserved_invariants: list[str] | None = None,
+    ) -> FocusedRevisionResult:
+        def build() -> FocusedRevisionResult:
+            r = default_focused_revision(
+                contract, proposal, issues, list(allowed_change_scope or [])
+            )
+            r.proposal.based_on_task_revision = state.task_revision
+            return r
+
+        return self._run("focused_revise", build, FocusedRevisionResult)
 
     def ablate(
         self,
@@ -314,6 +389,7 @@ class FakeCodexAdapter(ScriptedAdapter):
         contract: ChangeContract,
         proposal: DesignResult,
         issues: list[Issue],
+        acceptance_coverage: list | None = None,
     ) -> FinalReviewResult:
         def build() -> FinalReviewResult:
             return FinalReviewResult(

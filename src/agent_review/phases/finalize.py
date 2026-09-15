@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_review.models import ExitCode, Phase, SessionStatus
+from agent_review.models import ExitCode, Phase, ResultStatus, SessionStatus
 from agent_review.rendering import render_final
 
 
@@ -18,6 +18,10 @@ def run(o) -> ExitCode | None:
     final_md = render_final(o.state, contract, proposal, issues, decisions)
     o.store.write_text("final.md", final_md)
     o.event("FINAL_MD_WRITTEN")
+    o.state.result_status = ResultStatus.APPROVED.value
     o.transition(Phase.DONE, status=SessionStatus.DONE)
-    o.event("SESSION_DONE")
+    o.event("SESSION_DONE", result_status=o.state.result_status)
+    # V0.3 C1: every terminal session — including APPROVED — generates
+    # session-result.md + telemetry.json.
+    o._write_terminal_result(ResultStatus.APPROVED)
     return int(ExitCode.DONE)

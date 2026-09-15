@@ -106,8 +106,10 @@ def test_cli_handoff_summary_single_line_full_report_path(repo, monkeypatch):
     assert result.exit_code == int(ExitCode.HUMAN_HANDOFF)
     sid, session_dir = _session_dir_from_output(repo, result.output)
     expected = (
-        "HUMAN_HANDOFF: root cause UNRESOLVED, missing facts materially "
-        f"affect fix direction: {HOSTILE_MISSING_COLLAPSED} (session: {session_dir})"
+        "HUMAN_HANDOFF [NEEDS_HUMAN_DECISION]: root cause UNRESOLVED, missing "
+        "facts materially affect fix direction: "
+        f"{HOSTILE_MISSING_COLLAPSED} "
+        f"(session: {session_dir}; result: {session_dir}\\session-result.md)"
     )
     assert expected in result.output.splitlines()
     assert "\x1b" not in result.output

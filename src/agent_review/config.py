@@ -78,6 +78,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     limits = BudgetLimits()
     if "revision" in budgets:
         limits.max_revision_rounds = int(budgets["revision"])
+    if "focused_revision" in budgets:
+        limits.max_focused_revision_rounds = int(budgets["focused_revision"])
     if "ablation" in budgets:
         limits.max_ablation_rounds = int(budgets["ablation"])
     if "human_interruptions" in budgets:

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_review.models import (
+    AcceptanceCoverageEntry,
     ChangeContract,
     DecisionLog,
     DesignResult,
@@ -23,6 +24,7 @@ from agent_review.models import (
     GateLog,
     InvestigationResult,
     IssueLog,
+    ScopeAssessment,
     SessionState,
     SessionStatus,
 )
@@ -233,6 +235,26 @@ class StateStore:
     def load_discovery(self) -> DiscoveryResult | None:
         data = _read_json(self.dir / "discovery.json")
         return DiscoveryResult.model_validate(data) if data else None
+
+    # V0.3 C0: persisted scope assessment (scope-assessment.json).
+    def save_scope_assessment(self, result: ScopeAssessment) -> None:
+        _write_json(self.dir / "scope-assessment.json", json.loads(result.model_dump_json()))
+
+    def load_scope_assessment(self) -> ScopeAssessment | None:
+        data = _read_json(self.dir / "scope-assessment.json")
+        return ScopeAssessment.model_validate(data) if data else None
+
+    # V0.3 C4: acceptance criteria recorded by INITIAL_REVIEW; re-accounted
+    # by FINAL_REVIEW (criteria may not silently disappear from review).
+    def save_acceptance_coverage(self, entries: list[AcceptanceCoverageEntry]) -> None:
+        payload = {"entries": [json.loads(e.model_dump_json()) for e in entries]}
+        _write_json(self.dir / "acceptance-coverage.json", payload)
+
+    def load_acceptance_coverage(self) -> list[AcceptanceCoverageEntry]:
+        data = _read_json(self.dir / "acceptance-coverage.json")
+        if not data or not isinstance(data.get("entries"), list):
+            return []
+        return [AcceptanceCoverageEntry.model_validate(e) for e in data["entries"]]
 
     def save_investigation(self, result: InvestigationResult) -> None:
         _write_json(self.dir / "investigation.json", json.loads(result.model_dump_json()))
