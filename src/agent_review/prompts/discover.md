@@ -51,6 +51,15 @@ No timestamp, no repository name, no verbatim prompt truncation.
   shortcuts (`1`-`4`, `选项N`, `option N`) or the reserved commands
   (`0`, `custom`, `自定义`, `按推荐`/`都按推荐`); ambiguous packets are
   rejected.
+  Dependency protocol (packet-local candidate ids): give EVERY
+  candidate a short `candidate_id` (e.g. `C1`, `C2`; unique within this
+  reply). If a candidate's final question or valid options materially
+  depend on the answer to ANOTHER candidate in this same reply, list
+  that candidate's `candidate_id` in its `depends_on`. Dependencies must
+  reference ids you yourself defined here — unknown ids, self-references
+  and cycles are invalid and the whole packet is rejected (they are
+  never silently treated as independent questions). Candidates without
+  dependencies just use `depends_on: []`.
   Do NOT gate on: naming, local code organization, reviewer taste, optional
   future extensibility, or anything derivable from the repository.
 

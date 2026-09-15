@@ -346,7 +346,16 @@ class RealCodexAdapter:
         contract: ChangeContract,
         proposal: DesignResult,
         issues: list[Issue],
+        correction_delta=None,
     ) -> ClosureReviewResult:
+        """RC1 B404: receives the deterministic correction-delta context
+        (previous proposal snapshot, actual changed sections, focused
+        targets, preserved invariants) — the reviewer never has to infer
+        the delta from the corrected proposal alone."""
+        if correction_delta:
+            delta_ctx = correction_delta
+        else:
+            delta_ctx = "(no correction delta recorded for this correction)"
         prompt = render_prompt(
             "closure_review",
             request=state.request,
@@ -354,6 +363,7 @@ class RealCodexAdapter:
             contract=_json_compact(json.loads(contract.model_dump_json())),
             proposal=_json_compact(json.loads(proposal.model_dump_json())),
             issues=_json_compact([json.loads(i.model_dump_json()) for i in issues]),
+            correction_delta=delta_ctx,
             task_revision=state.task_revision,
             schema=_json_compact(ClosureReviewResult.model_json_schema()),
         )
@@ -367,19 +377,19 @@ class RealCodexAdapter:
         issues: list[Issue],
         acceptance_coverage: list | None = None,
     ) -> FinalReviewResult:
-        coverage_ctx = "(the initial review recorded no acceptance coverage)"
+        coverage_ctx = "(no acceptance baseline recorded)"
         if acceptance_coverage:
             lines = [
-                "## Acceptance criteria recorded by the initial review "
-                "(re-account each one)",
+                "## Current Acceptance Baseline (re-account EACH id)",
                 "",
             ]
             for entry in acceptance_coverage:
+                label = entry.acceptance_id or "(unassigned)"
                 note = f" (initially {entry.status}"
                 if entry.issue_title:
                     note += f", carried by '{entry.issue_title}'"
                 note += ")"
-                lines.append(f"- {entry.criterion}{note}")
+                lines.append(f"- [{label}] {entry.criterion}{note}")
             coverage_ctx = "\n".join(lines)
         prompt = render_prompt(
             "final_review",

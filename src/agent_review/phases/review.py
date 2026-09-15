@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from agent_review.agents.base import AgentError
 from agent_review.models import (
+    AcceptanceCriterion,
     CorrectionAction,
     CorrectionRecommendation,
     ExitCode,
@@ -36,6 +37,7 @@ from agent_review.models import (
     PassResult,
     Phase,
     ResultStatus,
+    enforce_late_blocker_provenance,
 )
 
 
@@ -106,39 +108,16 @@ def compute_pass(
 
 
 def _apply_late_new_issue_restrictions(o, issue: Issue) -> Issue:
-    """Enforce the late-phase new-blocker provenance contract (C4 §43/§45).
+    """B401 (RC1): late BLOCKING provenance fails closed — NEVER a
+    severity downgrade.
 
-    A new BLOCKING issue from CLOSURE/FINAL review must record WHY it
-    appeared now (``origin``). Serious late problems are never
-    suppressed — the reviewer merely has to carry provenance, which is
-    also its quality signal. Anything unexplained is downgraded to
-    NON_BLOCKING exactly like the V0 closure restriction did.
-
-    Backward-compatible default: a REGRESSION-categorized issue is the
-    canonical ``INTRODUCED_BY_CORRECTION`` case, so the origin is
-    filled deterministically when the reviewer omitted it.
+    The primary enforcement lives at the review-result model boundary
+    (protocol repair for real agents); this orchestrator-side check is
+    defense in depth for any programmatically constructed issue. The
+    only transformation allowed is the deterministic REGRESSION default
+    ``origin = INTRODUCED_BY_CORRECTION``.
     """
-    if issue.severity != IssueSeverity.BLOCKING:
-        return issue
-    if issue.origin is None and issue.category == IssueCategory.REGRESSION:
-        issue.origin = NewIssueOrigin.INTRODUCED_BY_CORRECTION
-    if issue.origin is None:
-        issue.severity = IssueSeverity.NON_BLOCKING
-        issue.resolution = (
-            "downgraded to NON_BLOCKING: a new BLOCKING issue in a later "
-            "review phase must record origin "
-            "(INTRODUCED_BY_CORRECTION | PREVIOUS_REVIEW_MISS | NEW_EVIDENCE | "
-            "DIRECTLY_REQUIRED_FOR_CLOSURE)"
-        )
-    elif (
-        issue.origin == NewIssueOrigin.PREVIOUS_REVIEW_MISS
-        and not (issue.why_not_detected_initially or "").strip()
-    ):
-        issue.severity = IssueSeverity.NON_BLOCKING
-        issue.resolution = (
-            "downgraded to NON_BLOCKING: PREVIOUS_REVIEW_MISS blockers must "
-            "explain why the issue was not detected in the initial review"
-        )
+    enforce_late_blocker_provenance([issue])
     return issue
 
 
@@ -152,6 +131,7 @@ def ingest_new_issues(o, new_issues: list[Issue], provenance: str) -> list[Issue
         issue.addressed_by = None
         issue.resolution = None
         issue.covered_by_decisions = []  # reviewer can never forge coverage
+        issue.covered_by_authority = []  # B405: same reset for all authority refs
         if provenance != "INITIAL_REVIEW":
             issue = _apply_late_new_issue_restrictions(o, issue)
         issue.id = f"R{log.next_issue_number:03d}"
@@ -217,9 +197,11 @@ def _need_human_ids(o) -> list[str]:
             continue
         if issue.status not in (IssueStatus.OPEN, IssueStatus.ADDRESSED):
             continue
-        if issue.covered_by_decisions:
-            # Issues already proven covered by ACTIVE decisions keep their
-            # blocker status but never re-enter the Human authority path.
+        if issue.covered_by_decisions or issue.covered_by_authority:
+            # Issues already proven covered by current Requirement
+            # Authority (ACTIVE decisions — V0.2 — or the current
+            # Acceptance Baseline — RC1 B405) keep their blocker status
+            # but never re-enter the Human authority path.
             continue
         category_driven = issue.category in (IssueCategory.REQUIREMENT, IssueCategory.FACT)
         recommended = issue.correction_action == CorrectionAction.HUMAN_DECISION
@@ -429,23 +411,68 @@ def route_after_failed_pass(
 
 
 # ---------------------------------------------------------------------------
-# C4: acceptance coverage accounting (design §40/§44)
+# C4 + RC1 B403: acceptance coverage accounting (design §40/§44)
 # ---------------------------------------------------------------------------
 
 
+def effective_acceptance_baseline(o) -> list[AcceptanceCriterion]:
+    """B403: the CURRENT effective Acceptance Baseline for this task
+    revision, resolved deterministically from persisted state:
+
+    1. the Change Contract's own ``acceptance_criteria`` (every RC1
+       session; INTAKE synthesizes them from REQUEST + ACTIVE
+       decisions);
+    2. explicit legacy compatibility rule for pre-RC1 persisted
+       sessions whose Contract predates the field: the baseline is
+       synthesized from the persisted initial acceptance coverage
+       (stable ids assigned in recorded order; REQUEST provenance is
+       attributed by the compatibility rule) — this can only trigger on
+       RESUMED historical sessions, never on newly created RC1 sessions;
+    3. before any coverage exists (a legacy session re-running
+       INITIAL_REVIEW): the same deterministic synthesis INTAKE uses.
+
+    The baseline is never empty, so an unaccounted session can never
+    APPROVE.
+    """
+    contract = o.store.load_contract()
+    if contract is not None and contract.acceptance_criteria:
+        if contract.based_on_task_revision != o.state.task_revision:
+            raise AgentError(
+                "acceptance baseline is stale (contract based_on_task_revision="
+                f"{contract.based_on_task_revision} != current "
+                f"{o.state.task_revision}); INTAKE must rebuild the contract "
+                "before review"
+            )
+        return list(contract.acceptance_criteria)
+    persisted = o.store.load_acceptance_coverage()
+    if persisted:
+        return [
+            AcceptanceCriterion(
+                id=f"A{index:03d}",
+                criterion=entry.criterion,
+                authority_refs=["REQUEST"],
+            )
+            for index, entry in enumerate(persisted, 1)
+        ]
+    from agent_review.phases.intake import synthesize_acceptance_criteria
+
+    return synthesize_acceptance_criteria(o)
+
+
 def _validate_acceptance_coverage(result) -> None:
-    """Mechanical FAIL-linkage and duplicate checks; fail closed."""
+    """Mechanical FAIL-linkage and duplicate-ID checks; fail closed."""
     seen: set[str] = set()
     blocking_titles = {
         i.title for i in result.issues if i.severity == IssueSeverity.BLOCKING
     }
     for entry in result.acceptance_coverage:
-        if entry.criterion in seen:
-            raise AgentError(
-                f"acceptance coverage lists duplicate criterion "
-                f"{entry.criterion!r}"
-            )
-        seen.add(entry.criterion)
+        if entry.acceptance_id is not None:
+            if entry.acceptance_id in seen:
+                raise AgentError(
+                    f"acceptance coverage lists duplicate acceptance_id "
+                    f"{entry.acceptance_id!r}"
+                )
+            seen.add(entry.acceptance_id)
         if entry.status == "FAIL" and entry.issue_title not in blocking_titles:
             raise AgentError(
                 f"acceptance criterion {entry.criterion!r} marked FAIL must "
@@ -454,19 +481,111 @@ def _validate_acceptance_coverage(result) -> None:
             )
 
 
-def _validate_final_coverage_completeness(o, result) -> None:
-    """FINAL_REVIEW may not let criteria silently disappear (§44)."""
-    initial = o.store.load_acceptance_coverage()
-    if not initial:
-        return  # initial review recorded no coverage (legacy/default adapters)
-    final_criteria = {e.criterion for e in result.acceptance_coverage}
-    missing = [e.criterion for e in initial if e.criterion not in final_criteria]
-    if missing or not final_criteria:
+def _coverage_id_report(result) -> str:
+    return ", ".join(
+        entry.acceptance_id or f"(missing id: {entry.criterion!r})"
+        for entry in result.acceptance_coverage
+    ) or "(no coverage provided)"
+
+
+def _validate_initial_coverage_ids(
+    o, baseline: list[AcceptanceCriterion], result
+) -> bool:
+    """B403: INITIAL_REVIEW must account for exactly the current
+    baseline, by stable acceptance ID.
+
+    Returns True when the session is an RC1 contract session (exact-ID
+    equality enforced); False for the legacy compatibility path (ids
+    assigned in reported order — only reachable by resumed pre-RC1
+    sessions, and still required to be non-empty so no false APPROVED
+    path exists).
+    """
+    contract = o.store.load_contract()
+    rc1_contract = bool(contract is not None and contract.acceptance_criteria)
+    if not rc1_contract:
+        if not result.acceptance_coverage:
+            raise AgentError(
+                "initial review recorded no acceptance coverage; a session "
+                "cannot APPROVE without accounting for the acceptance "
+                "baseline (fail closed)"
+            )
+        # Legacy rule: assign stable ids in reported order.
+        for index, entry in enumerate(result.acceptance_coverage, 1):
+            entry.acceptance_id = f"A{index:03d}"
+        return False
+    baseline_ids = {criterion.id for criterion in baseline}
+    reported_ids: list[str] = []
+    for entry in result.acceptance_coverage:
+        if entry.acceptance_id is None:
+            raise AgentError(
+                "initial review acceptance coverage must report the "
+                f"contract acceptance ids; entry {entry.criterion!r} has none "
+                f"(reported: {_coverage_id_report(result)})"
+            )
+        reported_ids.append(entry.acceptance_id)
+    reported = set(reported_ids)
+    missing = sorted(baseline_ids - reported)
+    unknown = sorted(reported - baseline_ids)
+    if missing or unknown or not reported:
+        raise AgentError(
+            "initial review acceptance coverage must account for exactly "
+            "the current Contract Acceptance Baseline "
+            f"({', '.join(sorted(baseline_ids))}); missing: "
+            f"{', '.join(missing) or '(none)'}; unknown: "
+            f"{', '.join(unknown) or '(none)'}; reported: "
+            f"{_coverage_id_report(result)}"
+        )
+    return True
+
+
+def _validate_final_coverage_completeness(
+    o, baseline: list[AcceptanceCriterion], result
+) -> None:
+    """B403/§44: FINAL_REVIEW re-accounts the SAME current baseline by
+    exact acceptance ID; missing/unknown/duplicate IDs fail closed."""
+    baseline_ids = {criterion.id for criterion in baseline}
+    reported: set[str] = set()
+    for entry in result.acceptance_coverage:
+        if entry.acceptance_id is None:
+            raise AgentError(
+                "final review acceptance coverage must report acceptance "
+                f"ids; entry {entry.criterion!r} has none "
+                f"(reported: {_coverage_id_report(result)})"
+            )
+        if entry.acceptance_id in reported:
+            raise AgentError(
+                "final review acceptance coverage lists duplicate "
+                f"acceptance_id {entry.acceptance_id!r}"
+            )
+        reported.add(entry.acceptance_id)
+    missing = sorted(baseline_ids - reported)
+    unknown = sorted(reported - baseline_ids)
+    if missing or unknown or not reported:
         raise AgentError(
             "final review acceptance coverage must re-account every "
-            "criterion from the initial review; missing: "
-            + ", ".join(missing or ["(no coverage provided)"])
+            "acceptance id of the current baseline "
+            f"({', '.join(sorted(baseline_ids))}); missing: "
+            f"{', '.join(missing) or '(no coverage provided)'}; unknown: "
+            f"{', '.join(unknown) or '(none)'}"
         )
+
+
+def save_correction_delta(o, payload: dict) -> None:
+    """B404: persist the deterministic correction-delta evidence Closure
+    Review receives (previous proposal snapshot, actual changed
+    sections, focused targets, preserved invariants)."""
+    import json
+
+    o.store.write_text(
+        "correction-delta.json",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+    o.event(
+        "CORRECTION_DELTA_RECORDED",
+        mechanism=payload.get("mechanism"),
+        actual_changed_sections=payload.get("actual_changed_sections"),
+        previous_proposal_snapshot=payload.get("previous_proposal_snapshot"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +607,10 @@ def run_initial(o) -> ExitCode | None:
         lambda: o.codex.initial_review(o.state, contract, proposal),
     )
     _validate_acceptance_coverage(result)
+    baseline = effective_acceptance_baseline(o)
+    # B403: exact-ID accounting for the current baseline (legacy rule
+    # inside); no empty-baseline false-APPROVED path exists.
+    _validate_initial_coverage_ids(o, baseline, result)
     ingested = ingest_new_issues(o, result.issues, provenance="INITIAL_REVIEW")
     blocking = sum(1 for i in ingested if i.severity == IssueSeverity.BLOCKING)
     non_blocking = sum(1 for i in ingested if i.severity == IssueSeverity.NON_BLOCKING)
@@ -584,7 +707,13 @@ def run_closure(o) -> ExitCode | None:
     result = o.agent_call(
         "codex",
         "closure_review",
-        lambda: o.codex.closure_review(o.state, contract, proposal, addressed),
+        lambda: o.codex.closure_review(
+            o.state,
+            contract,
+            proposal,
+            addressed,
+            correction_delta=o.store.read_text("correction-delta.json"),
+        ),
     )
 
     by_id = {i.id: i for i in log.issues}
@@ -667,7 +796,9 @@ def run_final(o) -> ExitCode | None:
         ),
     )
     _validate_acceptance_coverage(result)
-    _validate_final_coverage_completeness(o, result)
+    _validate_final_coverage_completeness(
+        o, effective_acceptance_baseline(o), result
+    )
 
     ingest_new_issues(o, result.issues, provenance="FINAL_REVIEW")
 

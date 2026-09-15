@@ -83,6 +83,22 @@ def make_orchestrator(repo, pi=None, codex=None, ui=None, kind=None):
     )
 
 
+def default_proposal_dict(request="给同步任务增加暂停能力") -> dict:
+    """The exact proposal dict the default fake DESIGN produces for the
+    standard make_orchestrator request — RC1 B404 fixtures echo it and
+    change ONLY in-scope sections so the actual-delta containment sees a
+    real focused correction."""
+    from agent_review.agents.fakes import default_design
+    from agent_review.models import ChangeContract
+
+    contract = ChangeContract(
+        user_intent=request,
+        current_behavior="(any)",
+        desired_behavior=request,
+    )
+    return default_design(contract).model_dump()
+
+
 # --- Scenario 6: Requirement Human Gate -------------------------------------
 
 

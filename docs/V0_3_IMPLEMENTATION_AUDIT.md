@@ -140,3 +140,78 @@ Design §62 goals verified: Bounded — scope guard allowed continuation, usable
 12. Independent Human Gate candidates batch together — met (cap 6 + dependency-only deferral; E2E-A live).
 13. All existing V0.2 safety and alias tests pass — met (293 baseline green with only the three design-mandated, annotated updates; +67 new).
 14. Real validation stays within the mandatory budget — met (2/2 sessions, 0/2 forcing variants, 18.9/60 min).
+
+---
+
+# V0.3-RC1 — Correctness Fix Implementation Audit
+
+**Status:** RC1 implemented — deterministic suite green (**404 passed, 2 skipped**; +42 tests over the V0.3 baseline of 360, 0 regressions), real Pi dependency-protocol validation green (1 session, 3.2 min), both structural case replays green
+**Implemented against:** `docs/V0_3_RC1_FIX_SPEC.md` (B401–B405 only; no V0.4-style capability added)
+**Baseline:** V0.3 (`841a472`)
+
+## RC1.1 How B401–B405 were closed
+
+| Blocker | Closure | Key code |
+| --- | --- | --- |
+| **B401** late blocker provenance fail-closed | Enforcement moved from an ingest-time severity downgrade to **schema validation at the review-result boundary**: `ClosureReviewResult`/`FinalReviewResult` model validators reject a new BLOCKING issue without `origin` (and `PREVIOUS_REVIEW_MISS` without `why_not_detected_initially`) — real agents get protocol repair, then FAILED. The deterministic REGRESSION → `INTRODUCED_BY_CORRECTION` default is preserved. `ingest_new_issues` keeps the same rule as orchestrator defense-in-depth (never downgrades). A missing-provenance defect can no longer produce DONE/APPROVED. | `models.py` (`enforce_late_blocker_provenance`), `phases/review.py`, prompts `closure_review.md`/`final_review.md` |
+| **B402** Agent-usable HumanCandidate dependency protocol | `HumanCandidate` gains a packet-local **`candidate_id`** the Agent authors itself; `depends_on` now references those ids — never the internal decision-key hash. Packet validation (`validate_candidate_dependency_packet` on `DiscoveryResult` and `InvestigationResult`): ids unique; unknown/self/cyclic references invalid (fail closed with auditable reasons; protocol repair applies). After validation the orchestrator resolves ids to the existing internal stable `decision_key` (`depends_on_keys`, resolved per source packet at collection); persisted Human Decisions keep decision-key identity/supersession unchanged. Prompts (`discover.md`, `investigate.md`) expose the protocol. | `models.py`, `phases/intake.py`, `phases/human_gate.py`, prompts |
+| **B403** Contract-owned current effective Acceptance Baseline | `ChangeContract` owns `acceptance_criteria: AcceptanceCriterion[]` (`id` A###, `criterion`, `authority_refs`). INTAKE synthesizes the baseline deterministically: **A001 ← REQUEST**, one criterion per ACTIVE Human Decision (← `D###`); assumptions/open questions never enter it. `AcceptanceCoverageEntry` gains `acceptance_id`; INITIAL and FINAL review coverage must equal the current baseline **by exact stable ID set** (missing/unknown/duplicate → fail closed); FAIL-linkage to a BLOCKING issue title retained. `effective_acceptance_baseline(o)` implements the documented **legacy compatibility rule** for pre-RC1 persisted sessions (baseline synthesized from persisted initial coverage, ids assigned in recorded order, REQUEST provenance attributed by the rule) — reachable only by resumed historical sessions, never a false-APPROVED path for new RC1 sessions. Task-revision rebuild archives the previous coverage to `history/acceptance-coverage-*.json`. | `models.py`, `phases/intake.py`, `phases/review.py`, `storage.py`, `rendering.py` (task.md section), prompts `initial_review.md`/`final_review.md`, `agents/codex.py` |
+| **B404** actual-delta containment | The orchestrator computes **`actual_changed_sections`** (`design_actual_changed_sections`: deterministic structural diff over every top-level DesignResult semantic field + `change_map.*` subfields) between old and new serialized proposals. With an explicit `allowed_change_scope`, `actual_changed_sections ⊆ scope` (canonical section-name normalization: case/whitespace/hyphen) must hold — **Pi's self-reported `changed_sections` is explanation/audit only**; omission cannot bypass containment. Empty scope stays an explicitly distinguished *semantic* scope (`FOCUSED_REVISION_SEMANTIC_SCOPE` event). Every correction persists `correction-delta.json` (mechanism, previous proposal snapshot, actual/reported sections, targets, invariants); Closure Review receives it as deterministic delta context (`{{CORRECTION_DELTA}}` prompt section) instead of inferring the delta. Reviewers are instructed to use the canonical section vocabulary in `change_scope`. | `models.py` (delta helpers), `phases/focused_revision.py`/`revision.py`/`ablation.py`, `phases/review.py` (`save_correction_delta`), `agents/codex.py`, prompts |
+| **B405** existing Requirement Authority reuse | The Human Authority Check evaluates the **current effective Requirement Authority**, not only ACTIVE decisions: `IssueAuthorityOutcome.authority_refs` may reference `D###` (ACTIVE decision), `A###` (current-baseline acceptance criterion) and `REQUEST`; coverage may combine refs. Every reference resolves mechanically (`_resolve_authority_refs`) — stale/superseded decisions and old-revision criteria fail closed to a NEEDS_HUMAN_DECISION-classified handoff. Covered issues revert to OPEN engineering blockers carrying auditable `covered_by_authority` (full ref list) + `covered_by_decisions`; they never re-enter the gate path (phase-entry re-checks and `_derive_result_status` updated). Prompt updated (`human_authority_check.md`). | `models.py`, `phases/human_gate.py`, `phases/review.py`, `orchestrator.py`, prompt |
+| **§9 regression** risk ≠ compositeness | No Scope Guard redesign: prompt guidance states the axes are different (high risk means deeper review, never DECOMPOSITION_REQUIRED by itself) and a deterministic regression pins high-risk-but-coherent → BOUNDED continues to DESIGN. | prompt `scope_guard.md`, `test_v03_rc1_fixes.py` |
+
+## RC1.2 Schema / state / prompt changes (minimal)
+
+- **Schema:** `AcceptanceCriterion` (new), `ChangeContract.acceptance_criteria`, `AcceptanceCoverageEntry.acceptance_id`, `HumanCandidate.candidate_id` + `depends_on_keys` (`depends_on` semantics now candidate-id based), `IssueAuthorityOutcome.authority_refs`, `Issue.covered_by_authority`, late-provenance validators on closure/final results. `schemas/codex-review.schema.json` regenerated.
+- **State machine:** unchanged (no new phases/edges; correction-delta is a persisted artifact, not a state).
+- **Prompts:** discover/investigate (candidate_id protocol), initial/final review (ID-based coverage), closure (correction-delta section + fail-closed provenance wording), focused revision (canonical section names + actual-delta truth), human authority check (authority_refs), scope guard (risk vs compositeness).
+- **Fixtures:** c454/84fb replays and focused/coverage fixtures updated to the RC1 protocols (baseline-ID coverage; canonical scopes; proposals echo the current design). Fake adapters model "a well-behaved reviewer accounts for the baseline" (auto-fill only when a scripted/default reply predates the id protocol) and the default focused revision mutates only in-scope fields.
+
+## RC1.3 Targeted tests (all green)
+
+`test_v03_rc1_fixes.py` (**38 new**): B402 duplicate/unknown/self/cycle rejection with auditable reasons + public-protocol ordering (C1 → HG001, C2 deferred until D001 ACTIVE, internal key stability) + batching + persisted ids; B403 non-empty baseline, decision-extended rebuild with history preservation, authority-ref validation, unknown/duplicate/missing-ID fail-closed, legacy compatibility rule + legacy empty-coverage cannot approve, reviewer-invented criterion rejected; B404 reported-ok-but-actual-outside rejected, omission bypass rejected, in-scope accepted + normalization, semantic-scope distinction, closure delta context (storage + real-adapter prompt render); B405 baseline/REQUEST/combined coverage (no gate, engineering correction), unknown/stale refs fail closed, genuinely-new still gates; Scope Guard high-risk BOUNDED regression; Acceptance/Authority + late-blocker + missing-coverage replays. Updated: `test_v03_review_convergence.py` (B401 fail-closed + ID coverage, 6 new), `test_v03_gate_batching.py` (public protocol), `test_v03_focused_revision.py` (actual-delta fixtures), `test_m2_issues_budgets.py` (downgrade test → fail-closed), 2 wording-only assertions in `test_v02_authority_convergence.py`, `test_m5_codex_adapter.py` prompt-render kwargs.
+
+## RC1.4 Full regression + case replay
+
+- **Full deterministic suite: 404 passed, 2 skipped (~71 s) — 1 post-change run.** (V0.3 baseline 360+2; +42, 0 regressions. All V0/V0.1/V0.2 safety invariants green: alias space, 2–4 options, custom decisions, latest-effective answers, authority check, PROD-001 replay, checkpoint recovery, no automatic ABLATION, focused-budget separation, terminal classifications.) A cosmetic enum-literal fix in one RC1 test helper afterwards was covered by rerunning that file (38/38); no further full run was needed.
+- **Case replays green:** 84fb composite → DECOMPOSITION_REQUIRED before DESIGN (fixture untouched); c454 bounded → one gate for 4 decisions → COVERED via D003 → FOCUSED_REVISION → NO_MATERIAL_PROGRESS_STOP → DESIGN_NOT_APPROVED (fixture updated to the 5-criterion baseline A001←REQUEST + A002..A005←D001..D004 and canonical `verification_plan` scope; behavior identical). No automatic ABLATION; engineering non-convergence = DESIGN_NOT_APPROVED.
+
+## RC1.5 Real-agent validation — B402 (mandatory, within budget)
+
+**Budget consumed: fresh real sessions 1/2 · forcing variants 0/1 · wall-clock 3.2 min / 30 min.** Validation stopped once the protocol invariant was proven (fix spec §13/§15).
+
+Session `20260915-125428-21a0` (scratch repo `C:\frank\aro-rc1-b402\export-tool`, natural request: a structured-export capability whose configuration items depend on the format choice; driver `scripts/v03_e2e_driver.py`; only gate keystrokes scripted). Verified **from persisted artifacts/events, no injected keys**:
+
+```text
+Pi's raw discover reply itself authors candidate_id C1..C4
+(raw/pi-discover.jsonl contains candidate_id; discovery.json persists them)
+C1 (FACT, independent) + C4 (TRADE_OFF, independent)  -> batched into HG001
+C2 (depends_on [C1]) and C3 (depends_on [C2])         -> GATE_CANDIDATE_DEFERRED
+                                                        (candidate_ids [C2, C3])
+HG001 closed -> D001/D002 ACTIVE -> task_revision 2 -> HG002 asks C2 only
+C3 stays deferred at the second round (transitive chain works)
+gate questions use the internal hash decision keys (FACT-48467d60 ...) -
+candidate ids never leak into persisted decision identity
+```
+
+## RC1.6 Known limitations
+
+1. **Legacy sessions that persisted V0.3 decision-key `depends_on` references cannot resume** under RC1 packet validation (unknown candidate ids) — explicit, documented compatibility break; no known real session used `depends_on` (both V0.3 E2E sessions predate any dependency use).
+2. **Fake-adapter coverage auto-fill** models a well-behaved reviewer for pre-RC1 fixtures; scripted non-empty coverage is never modified, and the empty-coverage fail-closed rule is additionally unit-tested at the validator boundary.
+3. **Actual-delta containment is structural** — it proves which serialized sections changed, not the semantic size of a change inside an allowed section; semantic drift within an in-scope section remains closure review's responsibility (unchanged V0.3 boundary).
+4. **Canonical section vocabulary is a convention** — prompts instruct reviewers to use canonical names and matching normalizes case/whitespace/hyphens, but a reviewer using a non-canonical label on a real session fails closed (protocol repair recovers; accepted friction, same class as the V0.3 string-exact final coverage check).
+5. Deferred items from the fix spec (N402 stronger material-progress evidence, N403 mandatory correction_action, full Living Requirement system, free-form Human conversation, annotation extraction, interruption accounting, multi-session orchestration, new budgets/rounds) remain **not implemented** by RC1.
+
+## RC1.7 Natural real-business validation
+
+```text
+RC1 correctness mechanically validated
+real Pi dependency protocol validated
+natural real-business validation pending next suitable task
+```
+
+Per fix spec §14: the next suitable real bounded engineering task is the natural sample (record scope verdict, time to first proposal, elapsed, interruptions, correction counts, baseline size/authority sources, initial coverage completeness, late blockers + provenance, existing-authority coverage count, terminal result, session-result usability). No fake business task was manufactured.
+
+## RC1.8 Commit
+
+Recorded in the repository history immediately after this audit (RC1 commit; see the final report for the SHA).

@@ -244,9 +244,19 @@ class StateStore:
         data = _read_json(self.dir / "scope-assessment.json")
         return ScopeAssessment.model_validate(data) if data else None
 
-    # V0.3 C4: acceptance criteria recorded by INITIAL_REVIEW; re-accounted
-    # by FINAL_REVIEW (criteria may not silently disappear from review).
+    # V0.3 C4 + RC1 B403: acceptance criteria recorded by INITIAL_REVIEW;
+    # re-accounted by FINAL_REVIEW by exact stable id (criteria may never
+    # silently disappear from review). A second INITIAL_REVIEW implies a
+    # task-revision rebuild: the previous baseline is archived to
+    # history/ so the old revision's audit trail stays intact.
     def save_acceptance_coverage(self, entries: list[AcceptanceCoverageEntry]) -> None:
+        current = self.dir / "acceptance-coverage.json"
+        if current.is_file():
+            from uuid import uuid4
+
+            stamp = uuid4().hex
+            dest = self.history_dir / f"acceptance-coverage-{stamp}.json"
+            _atomic_write(dest, current.read_text(encoding="utf-8"))
         payload = {"entries": [json.loads(e.model_dump_json()) for e in entries]}
         _write_json(self.dir / "acceptance-coverage.json", payload)
 

@@ -35,6 +35,17 @@ it was discovered late.
 
 {{ISSUES}}
 
+## Correction delta (deterministic, orchestrator-computed)
+
+{{CORRECTION_DELTA}}
+
+Use this delta evidence — previous proposal snapshot reference, the
+ACTUAL changed sections computed from the serialized proposals, focused
+target issues and preserved invariants — instead of inferring the
+correction from the corrected proposal alone. `actual_changed_sections`
+is orchestrator-owned truth; the author's self-report is explanation
+only.
+
 ## New blocker restrictions + provenance
 
 A new BLOCKING issue is allowed ONLY with recorded `origin` explaining
@@ -48,8 +59,11 @@ why it appears now:
 - `DIRECTLY_REQUIRED_FOR_CLOSURE` — required to verify closure of the
   listed blockers.
 
-An unexplained new BLOCKING issue is downgraded to NON_BLOCKING by the
-orchestrator. Do not re-litigate the initial review.
+A BLOCKING issue without valid provenance makes the whole reply
+INVALID (the orchestrator rejects it and asks you to re-emit; it is
+never silently downgraded to NON_BLOCKING — a reviewer protocol defect
+must not lower engineering severity). Do not re-litigate the initial
+review.
 
 ## Material progress (for UNRESOLVED outcomes)
 

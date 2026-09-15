@@ -34,12 +34,22 @@ validates your result and owns all routing. You never decide PASS.
 For EVERY listed issue, return exactly one outcome:
 
 1. `COVERED_BY_ACTIVE_DECISION` — the semantics the issue claims are
-   missing were already decided by one or more ACTIVE decisions above.
-   - `referenced_decision_ids` MUST list existing decision ids
+   missing were already decided by the current effective Requirement
+   Authority: one or more ACTIVE decisions above, and/or acceptance
+   criteria of the Change Contract's current Acceptance Baseline
+   (`A001`, `A002`, ... — embedded in the contract above), and/or the
+   original user REQUEST itself.
+   - `referenced_decision_ids` lists existing ACTIVE decision ids
      (e.g. `D001`) that establish the semantics — the orchestrator
      rejects unknown or non-ACTIVE ids and fails closed;
-   - `rationale` MUST explain HOW the decision covers the disputed
-     semantics (an implementation gap is not a missing decision);
+   - `authority_refs` may additionally or alternatively reference
+     `A###` (a criterion of the CURRENT contract baseline) and
+     `REQUEST` (the original user request); every reference must be
+     mechanically resolvable — stale, superseded or unknown references
+     fail closed;
+   - `rationale` MUST explain HOW the referenced authority covers the
+     disputed semantics (an implementation gap is not a missing
+     decision);
    - use this when the likely problem is the proposal failing to
      implement an already-decided requirement.
 

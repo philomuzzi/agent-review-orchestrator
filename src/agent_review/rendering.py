@@ -100,6 +100,17 @@ def render_task(contract: ChangeContract) -> str:
             lines.append(f"- impact_if_wrong: {a.impact_if_wrong}")
         parts.append(_section("Assumptions", lines))
     parts.append(_section("Confirmed Decisions", _bullets(contract.confirmed_decisions)))
+    if contract.acceptance_criteria:
+        criteria_lines = [
+            f"- [{c.id}] {c.criterion} (authority: {', '.join(c.authority_refs)})"
+            for c in contract.acceptance_criteria
+        ]
+        parts.append(
+            _section(
+                "Acceptance Criteria (current effective baseline)",
+                criteria_lines,
+            )
+        )
     parts.append(_section("Open Questions", _bullets(contract.open_questions)))
     parts.append(_section("Out of Scope", _bullets(contract.out_of_scope)))
     parts.append(f"\n> based_on_task_revision: {contract.based_on_task_revision}\n")

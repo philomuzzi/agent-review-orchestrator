@@ -57,18 +57,24 @@ Examples:
 A verification plan whose evidence cannot discriminate correct from
 incorrect behavior is a BLOCKING issue in its own right.
 
-## Acceptance coverage
+## Acceptance coverage (by stable acceptance ID)
 
-Enumerate every acceptance criterion you can derive from the Change
-Contract and the request, and account for EACH one explicitly in
-`acceptance_coverage`:
+The Change Contract above carries the CURRENT effective Acceptance
+Baseline (`acceptance_criteria`, stable ids `A001`, `A002`, ...). You
+must account for EACH criterion explicitly in `acceptance_coverage`,
+reporting by its exact `acceptance_id`:
 
+- `acceptance_id` — the criterion's stable id from the Contract;
+- `criterion` — echo of the criterion text;
 - `status: PASS` — the proposal satisfies the criterion;
 - `status: FAIL` — it does not; `issue_title` MUST be the exact title
   of the BLOCKING issue in this same result that carries the criterion.
 
-Criteria may not silently disappear: an unaccounted criterion is an
-incomplete review.
+Coverage must match the Contract baseline exactly: a missing,
+duplicated or unknown acceptance id is an invalid review and fails
+closed — criteria may never silently disappear. Never invent new
+authoritative criteria: a Requirement gap you discover is an ISSUE, not
+a Contract mutation.
 
 ## BLOCKING rules
 
@@ -99,7 +105,13 @@ workflow should take (`correction_action`):
   part requires correction (validation evidence, specific behavior,
   transaction boundary, data/index strategy, API compatibility detail,
   rollback detail, operability control); list the sections/components
-  the fix may touch in `change_scope`;
+  the fix may touch in `change_scope` using the proposal's canonical
+  section names: `summary`, `current_flow`, `proposed_flow`,
+  `changes`, `data_model_changes`, `interface_changes`,
+  `state_lifecycle_changes`, `failure_handling`, `compatibility`,
+  `risks`, `alternatives_considered`, `verification_plan`,
+  `explicitly_unchanged`, or `change_map.<subfield>`; an empty
+  `change_scope` means a semantic scope (no mechanical containment);
 - `ABLATION` — ONLY when the genuine fix is to remove/simplify/reduce
   (over-design); never propose this as a generic fallback;
 - `HUMAN_DECISION` — a new authoritative Human Requirement/Fact

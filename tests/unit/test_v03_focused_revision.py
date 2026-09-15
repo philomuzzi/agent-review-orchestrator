@@ -29,6 +29,7 @@ from agent_review.orchestrator import Orchestrator
 from tests.unit.test_m3_human_gate import (
     ScriptedUI,
     candidate,
+    default_proposal_dict,
     discovery_with_candidates,
     make_orchestrator,
 )
@@ -55,18 +56,31 @@ def events_of(o) -> list[dict]:
     ]
 
 
-def focused_result_json(issue_ids, allowed_scope, changed_sections, extra=""):
+def focused_result_json(
+    issue_ids, allowed_scope, changed_sections, extra="", base_summary=None
+):
+    """RC1 B404: the scripted proposal ECHOES the original design and
+    changes only the in-scope section, so the orchestrator's actual-
+    delta containment holds (except where a test intentionally violates
+    it). ``base_summary`` matches the CURRENT proposal when an earlier
+    full revision already touched it."""
     responses = [
         {"issue_id": i, "how_addressed": f"focused fix satisfies the close condition of {i}"}
         for i in issue_ids
     ]
+    proposal = default_proposal_dict()
+    if base_summary is not None:
+        proposal["summary"] = base_summary
+    if "verification_plan" in allowed_scope or not allowed_scope:
+        proposal["verification_plan"] = [
+            "focused tests now prove the retry path before budget exhaustion"
+        ]
+    if not allowed_scope:
+        # semantic scope: keep the legacy summary touch as well
+        proposal["summary"] = "focused revised design"
     return json.dumps(
         {
-            "proposal": {
-                "summary": "focused revised design",
-                "explicitly_unchanged": ["everything outside the allowed scope"],
-                "changes": ["bounded fix inside the allowed scope"],
-            },
+            "proposal": proposal,
             "target_issue_ids": list(issue_ids),
             "allowed_change_scope": list(allowed_scope),
             "preserved_invariants": [
@@ -235,7 +249,12 @@ def test_focused_revision_budget_is_separate_mechanism(repo):
     pi = FakePiAdapter(
         script={
             "focused_revise": [
-                focused_result_json(["R002"], ["verification-plan"], ["verification-plan"])
+                focused_result_json(
+                    ["R002"],
+                    ["verification-plan"],
+                    ["verification-plan"],
+                    base_summary="Revised minimal design: 给同步任务增加暂停能力",
+                )
             ],
         }
     )

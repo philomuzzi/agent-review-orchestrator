@@ -75,6 +75,7 @@ def test_all_review_prompts_render():
             proposal="{}",
             coverage="(no acceptance coverage recorded)",
             issues="[]",
+            correction_delta="(no correction delta recorded)",
             task_revision=1,
             schema="{}",
         )

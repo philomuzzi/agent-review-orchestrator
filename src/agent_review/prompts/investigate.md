@@ -42,7 +42,11 @@ Find the root cause, or state honestly that it is UNRESOLVED.
   outside 2-4 are rejected, never truncated); within one candidate,
   option keys and labels must be mutually distinct after normalization
   and must not collide with the answer shortcuts or reserved commands.
-  Ambiguous packets are rejected.
+  Ambiguous packets are rejected. Dependency protocol: give every
+  candidate a short unique `candidate_id` (`C1`, `C2`, ...) and express
+  dependencies between questions via `depends_on: [<candidate_id>]`
+  referencing ids you defined in this same reply; unknown ids,
+  self-references and cycles invalidate the whole packet.
 
 ## Hard rules
 

@@ -204,30 +204,31 @@ def test_scenario_18_non_blocking_does_not_block(repo):
 # --- Scenario 12: closure new-blocker restrictions ---------------------------
 
 
-def test_closure_illegal_new_blocker_downgraded(repo):
+def test_closure_illegal_new_blocker_fails_closed(repo):
+    """V0.3-RC1 B401: a late BLOCKING issue without origin is a protocol
+    failure (repair, then FAILED) — never a downgrade to NON_BLOCKING,
+    never a false PASS."""
     illegal = make_blocking_issue(9, "late architecture taste")
     illegal.why_not_detected_initially = None
+    bad = json.dumps(
+        {
+            "issue_outcomes": [
+                {"issue_id": "R001", "resolution": "RESOLVED", "note": "ok"}
+            ],
+            "new_issues": [json.loads(illegal.model_dump_json())],
+            "summary": "adds a taste blocker",
+        }
+    )
     codex = FakeCodexAdapter(
         script={
             "initial_review": [blocker_review_json()],
-            "closure_review": [
-                json.dumps(
-                    {
-                        "issue_outcomes": [
-                            {"issue_id": "R001", "resolution": "RESOLVED", "note": "ok"}
-                        ],
-                        "new_issues": [json.loads(illegal.model_dump_json())],
-                        "summary": "adds a taste blocker",
-                    }
-                )
-            ],
+            "closure_review": [bad],
+            "closure_review:repair": [bad],
         }
     )
     o, code = run_flow(repo, codex=codex)
-    assert code == int(ExitCode.DONE)
-    issues = {i.id: i for i in o.store.load_issues().issues}
-    assert issues["R002"].severity == IssueSeverity.NON_BLOCKING
-    assert "downgraded" in (issues["R002"].resolution or "")
+    assert code == int(ExitCode.FAILED)
+    assert "must record origin" in (o.state.error or "")
 
 
 def test_closure_regression_blocker_allowed(repo):

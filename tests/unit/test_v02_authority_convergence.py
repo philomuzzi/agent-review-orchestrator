@@ -208,7 +208,7 @@ def test_b9a_nonexistent_decision_reference_fails_closed(repo):
         repo, covered_result(decision_ids=("D999",)), ui_answers=[]
     )
     assert o.run() == int(ExitCode.HUMAN_HANDOFF)
-    assert "non-ACTIVE or nonexistent" in (o.state.handoff_reason or "")
+    assert "nonexistent authority" in (o.state.handoff_reason or "")
     assert (o.store.dir / "handoff.md").is_file()
 
 
@@ -240,7 +240,7 @@ def test_b9b_superseded_decision_reference_fails_closed(repo):
     o.pi = pi
     code = resolve_need_human_issues(o, ["R001"])
     assert code == int(ExitCode.HUMAN_HANDOFF)
-    assert "non-ACTIVE" in (o.state.handoff_reason or "")
+    assert "superseded" in (o.state.handoff_reason or "")
     # The issue was NOT downgraded or reverted by an invalid claim.
     assert o.store.load_issues().issues[0].status == IssueStatus.NEED_HUMAN
 

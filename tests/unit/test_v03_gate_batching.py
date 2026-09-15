@@ -30,9 +30,17 @@ def events_of(o) -> list[dict]:
     ]
 
 
-def dependent_candidate(question, depends_on):
+def dependent_candidate(question, depends_on, candidate_id="C2"):
     base = candidate(question=question)
+    base["candidate_id"] = candidate_id
     base["depends_on"] = depends_on
+    return base
+
+
+def independent_candidate(question, candidate_id="C1"):
+    base = candidate(question=question)
+    base["candidate_id"] = candidate_id
+    base["depends_on"] = []
     return base
 
 
@@ -66,14 +74,13 @@ def test_seven_independent_candidates_defer_overflow_only(repo):
 
 def test_dependent_candidate_defers_to_second_gate(repo):
     """A candidate whose options depend on the current gate's answers is
-    the ONLY legitimate deferral (design §51)."""
-    independent = candidate(question="Storage engine?")
-    dependent = dependent_candidate("Retention window given engine?", depends_on=[])
-    # the dependency key is derived from the independent question
-    from agent_review.phases.human_gate import candidate_decision_key
-
-    dep_key = candidate_decision_key("REQUIREMENT", "Storage engine?")
-    dependent["depends_on"] = [dep_key]
+    the ONLY legitimate deferral (design §51). RC1 B402: the dependency
+    is expressed through the PUBLIC packet-local candidate_id protocol —
+    no internal decision-key hash is involved."""
+    independent = independent_candidate("Storage engine?", "C1")
+    dependent = dependent_candidate(
+        "Retention window given engine?", depends_on=["C1"], candidate_id="C2"
+    )
     pi = FakePiAdapter(
         script={"discover": [discovery_with_candidates([independent, dependent])]}
     )
@@ -84,21 +91,30 @@ def test_dependent_candidate_defers_to_second_gate(repo):
     assert len(log.gates) == 2
     assert len(log.gates[0].questions) == 1  # only the independent one
     assert len(log.gates[1].questions) == 1  # the dependent one, after close
-    events = [e["event"] for e in events_of(o)]
+    # The internal decision_key identity stays hash-derived and stable.
+    from agent_review.phases.human_gate import candidate_decision_key
+
+    assert log.gates[0].questions[0].decision_key == candidate_decision_key(
+        "REQUIREMENT", "Storage engine?"
+    )
+    assert log.gates[1].questions[0].decision_key == candidate_decision_key(
+        "REQUIREMENT", "Retention window given engine?"
+    )
     deferred = [e for e in events_of(o) if e["event"] == "GATE_CANDIDATE_DEFERRED"]
     assert deferred and deferred[0]["reason"].startswith("question or options depend")
+    assert deferred[0]["candidate_ids"] == ["C2"]
 
 
 def test_dependency_on_already_decided_key_batches_immediately(repo):
-    """A depends_on referencing an already-ACTIVE decision is satisfied —
-    the candidate is NOT deferred."""
+    """A depends_on referencing a candidate whose decision is already
+    ACTIVE is satisfied — the candidate is NOT deferred."""
     from agent_review.phases.human_gate import candidate_decision_key
 
     decided_key = candidate_decision_key("REQUIREMENT", "Storage engine?")
-    first = candidate(question="Storage engine?")
+    first = independent_candidate("Storage engine?", "C1")
     # Second round of candidates: the dependent question now coexists
     # with an ACTIVE decision satisfying its dependency.
-    later = dependent_candidate("Retention policy?", depends_on=[decided_key])
+    later = dependent_candidate("Retention policy?", depends_on=["C1"])
     unrelated = candidate(question="Alert threshold?")
     pi = FakePiAdapter(
         script={
@@ -136,6 +152,15 @@ def test_dependency_on_already_decided_key_batches_immediately(repo):
     o2.store.save_decisions(log)
     later_model = HumanCandidate.model_validate(later)
     unrelated_model = HumanCandidate.model_validate(unrelated)
+    # Resolve the packet-local ids the way collect_human_candidates does.
+    id_keys = {
+        (c.candidate_id or "").strip(): candidate_decision_key(c.category, c.question)
+        for c in (later_model, unrelated_model)
+        if (c.candidate_id or "").strip()
+    }
+    later_model.depends_on_keys = [
+        id_keys[ref] for ref in later_model.depends_on if ref in id_keys
+    ]
     created, code = human_gate._gate_from_candidates(o2, [later_model, unrelated_model])
     assert code is None and created
     log2 = load_log(o2.store)
@@ -154,10 +179,12 @@ def test_dependency_on_already_decided_key_batches_immediately(repo):
 def test_independent_and_dependent_mixed_batching(repo):
     from agent_review.phases.human_gate import candidate_decision_key
 
-    anchor = candidate(question="Output format?")
+    anchor = independent_candidate("Output format?", "C1")
     anchor_key = candidate_decision_key("REQUIREMENT", "Output format?")
     unrelated = candidate(question="Retry budget?")
-    dependent = dependent_candidate("Notification channel given format?", depends_on=[anchor_key])
+    dependent = dependent_candidate(
+        "Notification channel given format?", depends_on=["C1"], candidate_id="C2"
+    )
     pi = FakePiAdapter(
         script={
             "discover": [

@@ -46,6 +46,7 @@ from agent_review.models import (
 
 from tests.unit.test_m3_human_gate import (
     ScriptedUI,
+    default_proposal_dict,
     discovery_with_candidates,
     make_orchestrator,
 )
@@ -273,7 +274,8 @@ def intake_candidates_c454_shape():
 
 def validation_blocker():
     """The persistent engineering blocker: evidence quality (the real
-    R001 shape — validation evidence without discrimination power)."""
+    R001 shape — validation evidence without discrimination power).
+    RC1 B404: change_scope uses the proposal's canonical section name."""
     issue = make_blocking_issue(
         1,
         title="验证证据不具备区分力：重试用例在旧分类下同样通过",
@@ -289,7 +291,7 @@ def validation_blocker():
             "category": IssueCategory.REQUIREMENT,
             "correction_action": CorrectionAction.FOCUSED_REVISION,
             "focus_area": FocusArea.VALIDATION,
-            "change_scope": ["验证计划", "用例矩阵"],
+            "change_scope": ["verification_plan"],
         }
     )
 
@@ -315,21 +317,54 @@ def covered_by_active_decisions():
     )
 
 
-def focused_revision_result():
+def baseline_coverage_c454(blocker_title):
+    """RC1 B403: the exact baseline for the c454 session after the four
+    intake decisions became ACTIVE — A001 ← REQUEST, A002..A005 ← the
+    four decisions D001..D004 (answered in gate order)."""
+    decision_labels = [
+        "内部错误复用哪条重试通道与预算？",
+        "分类失真是否随本次单一并修复？",
+        "存量失败数据的处置是否纳入本次交付？",
+        "混合错误且部分数据可用时以谁优先？",
+    ]
+    answers = ["reuse", "together", "ops_later", "retry_first"]
+    entries = [
+        {
+            "acceptance_id": "A001",
+            "criterion": f"原始请求的期望行为已交付：{BOUNDED_REQUEST}",
+            "status": "FAIL",
+            "issue_title": blocker_title,
+        }
+    ]
+    for index, (question, answer) in enumerate(zip(decision_labels, answers), 2):
+        entries.append(
+            {
+                "acceptance_id": f"A{index:03d}",
+                "criterion": f"Human Decision D{index - 1:03d}: {question} -> {answer}",
+                "status": "PASS",
+            }
+        )
+    return entries
+
+
+def focused_revision_result(request=None):
+    """RC1 B404: the focused proposal echoes the current design verbatim
+    and changes ONLY the in-scope canonical section."""
+    proposal = default_proposal_dict(request or BOUNDED_REQUEST)
+    proposal["verification_plan"] = [
+        "重试用例先断言重试事件发生，再驱动预算耗尽并断言退出",
+        "混合错误部分可用用例优先断言可重试通道",
+    ]
     return json.dumps(
         {
-            "proposal": {
-                "summary": "聚焦修正：重试验证改为先证明进入通道再证明耗尽退出",
-                "explicitly_unchanged": ["分类器整体结构", "通道配置", "调度行为"],
-                "changes": ["仅验证计划与用例矩阵按关闭条件修正"],
-            },
+            "proposal": proposal,
             "target_issue_ids": ["R001"],
-            "allowed_change_scope": ["验证计划", "用例矩阵"],
+            "allowed_change_scope": ["verification_plan"],
             "preserved_invariants": [
                 "ACTIVE Human Decisions 全部保持不变",
                 "分类器整体结构保持不变",
             ],
-            "changed_sections": ["验证计划", "用例矩阵"],
+            "changed_sections": ["verification_plan"],
             "issue_responses": [
                 {
                     "issue_id": "R001",
@@ -380,14 +415,9 @@ def test_bounded_case_design_not_approved_not_needs_human(repo):
                 json.dumps(
                     {
                         "issues": [validation_blocker().model_dump()],
-                        "acceptance_coverage": [
-                            {
-                                "criterion": "A01 内部错误进入瞬时重试",
-                                "status": "FAIL",
-                                "issue_title": "验证证据不具备区分力：重试用例在旧分类下同样通过",
-                            },
-                            {"criterion": "A02 存量处置后置", "status": "PASS"},
-                        ],
+                        "acceptance_coverage": baseline_coverage_c454(
+                            "验证证据不具备区分力：重试用例在旧分类下同样通过"
+                        ),
                         "summary": "initial",
                     }
                 )
@@ -474,6 +504,10 @@ def test_bounded_case_focused_revision_closes_blocker_when_progress_holds(repo):
     variant_blocker = validation_blocker().model_copy(
         update={"category": IssueCategory.DESIGN}
     )
+    # This companion session keeps the default harness request, so the
+    # echoed proposal uses that request's summary.
+    default_request = "给同步任务增加暂停能力"
+    pi.script["focused_revise"] = [focused_revision_result(default_request)]
     codex = FakeCodexAdapter(
         script={
             "initial_review": [

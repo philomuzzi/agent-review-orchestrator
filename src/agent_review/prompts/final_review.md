@@ -37,9 +37,11 @@ readiness only:
 ## Acceptance completeness
 
 Re-account EVERY acceptance criterion listed above in
-`acceptance_coverage` (same criterion strings, PASS/FAIL per
+`acceptance_coverage` — by its exact `acceptance_id` (PASS/FAIL per
 criterion; FAIL requires the exact `issue_title` of a BLOCKING issue in
-this result). Criteria may not silently disappear from review.
+this result). Coverage must match the current baseline exactly: a
+missing, duplicated or unknown acceptance id fails closed — criteria
+may never silently disappear from review.
 
 ## Late blockers + provenance
 
@@ -51,7 +53,9 @@ suppressed because it is late — but it MUST carry `origin`:
 - `PREVIOUS_REVIEW_MISS` — also set `why_not_detected_initially`;
 - `NEW_EVIDENCE` — evidence that only became available now.
 
-Unexplained new BLOCKING issues are downgraded to NON_BLOCKING.
+A BLOCKING issue without valid provenance makes the whole reply
+INVALID (rejected and re-requested; never silently downgraded to
+NON_BLOCKING).
 
 ## Correction recommendations
 

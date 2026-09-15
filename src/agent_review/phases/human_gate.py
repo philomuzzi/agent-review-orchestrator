@@ -488,10 +488,15 @@ def _gate_from_candidates(o, candidates: list[HumanCandidate]) -> tuple[bool, Ex
 
     V0.3 C5 §51: a candidate may be deferred ONLY when its final
     question or valid options materially depend on answers from the
-    current Human Gate (``depends_on`` referencing another batched or
-    deferred candidate key). Independent candidates are batched into
-    the same gate; the overflow beyond MAX_QUESTIONS_PER_GATE stays a
+    current Human Gate. Independent candidates are batched into the
+    same gate; the overflow beyond MAX_QUESTIONS_PER_GATE stays a
     REQUIREMENT_TOO_AMBIGUOUS deferral.
+
+    V0.3-RC1 B402: dependencies were declared through the PUBLIC
+    packet-local ``candidate_id`` protocol and resolved to internal
+    decision keys at collection time (``depends_on_keys``); the
+    batching logic below never touches the internal hash. A dependency
+    already satisfied by an ACTIVE decision batches immediately.
     """
     eligible, _suppressed = eligible_candidates(o, candidates)
     if not eligible:
@@ -508,7 +513,7 @@ def _gate_from_candidates(o, candidates: list[HumanCandidate]) -> tuple[bool, Ex
     batch: list[HumanCandidate] = []
     deferred: list[HumanCandidate] = []
     for c in eligible:
-        open_deps = set(c.depends_on) - {_key(c)} - decided
+        open_deps = set(c.depends_on_keys) - {_key(c)} - decided
         if open_deps:
             deferred.append(c)
         else:
@@ -522,7 +527,7 @@ def _gate_from_candidates(o, candidates: list[HumanCandidate]) -> tuple[bool, Ex
             _key(x) for x in deferred
         }
         for c in list(deferred):
-            open_deps = set(c.depends_on) - {_key(c)} - decided
+            open_deps = set(c.depends_on_keys) - {_key(c)} - decided
             if not open_deps & gate_keys:
                 batch.append(c)
                 deferred.remove(c)
@@ -531,6 +536,9 @@ def _gate_from_candidates(o, candidates: list[HumanCandidate]) -> tuple[bool, Ex
         o.event(
             "GATE_CANDIDATE_DEFERRED",
             deferred=[_key(c) for c in deferred],
+            candidate_ids=[
+                (c.candidate_id or "").strip() for c in deferred
+            ],
             reason="question or options depend on the current gate's answers",
         )
     questions = [_to_question(c) for c in batch]
@@ -572,6 +580,19 @@ def try_gate_for_unresolved_root_cause(o, result) -> ExitCode | None:
         for c in result.human_candidates
         if c.category == GateCategory.FACT.value
     ]
+    # B402: resolve packet-local candidate ids to decision keys so the
+    # same public dependency protocol works for investigation packets.
+    id_keys = {
+        (c.candidate_id or "").strip(): candidate_key_of(c)
+        for c in fact_candidates
+        if (c.candidate_id or "").strip()
+    }
+    for c in fact_candidates:
+        c.depends_on_keys = [
+            id_keys[ref.strip()]
+            for ref in c.depends_on
+            if ref.strip() in id_keys
+        ]
     created, code = _gate_from_candidates(o, fact_candidates)
     if code is not None:
         return code
@@ -750,6 +771,37 @@ def _run_authority_check(o, issue_ids: list[str]) -> HumanAuthorityCheckResult |
     )
 
 
+def _resolve_authority_refs(
+    o, refs: list[str], decisions_by_id: dict[str, Decision], baseline_ids: set[str]
+) -> list[str]:
+    """B405: mechanically resolve current-authority references.
+
+    Valid forms: ``REQUEST`` (the original user request), ``D###`` (an
+    ACTIVE Human Decision — superseded decisions are stale and fail
+    closed) and ``A###`` (an acceptance criterion of the CURRENT
+    effective Acceptance Baseline — criteria from an old task revision
+    cannot provide current coverage). The Agent cannot forge a
+    reference the orchestrator cannot resolve.
+    """
+    stale: list[str] = []
+    for ref in refs:
+        ref = (ref or "").strip()
+        if not ref:
+            stale.append(ref)
+        elif ref == "REQUEST":
+            continue
+        elif ref.startswith("D") and ref[1:].isdigit():
+            decision = decisions_by_id.get(ref)
+            if decision is None or decision.status != DecisionStatus.ACTIVE:
+                stale.append(ref)
+        elif ref.startswith("A") and ref[1:].isdigit():
+            if ref not in baseline_ids:
+                stale.append(ref)
+        else:
+            stale.append(ref)
+    return stale
+
+
 def resolve_need_human_issues(
     o, issue_ids: list[str], allow_revision: bool = True, continue_routing: bool = True
 ) -> ExitCode | None:
@@ -804,24 +856,39 @@ def resolve_need_human_issues(
     decided_keys = {
         d.decision_key for d in _active_decisions(o)
     }
+    # B405: the current effective Acceptance Baseline is Requirement
+    # Authority too — coverage may reference its acceptance ids.
+    from agent_review.phases.review import effective_acceptance_baseline
 
-    covered: list[tuple[object, list[str], str]] = []
+    baseline_ids = {c.id for c in effective_acceptance_baseline(o)}
+
+    covered: list[tuple[object, list[str], list[str], str]] = []
     candidates: list[tuple[object, DecisionCandidate]] = []
     candidate_keys: dict[str, str] = {}  # decision_key -> issue_id (B203.3)
     for issue_id in issue_ids:
         outcome = by_issue[issue_id]
         if outcome.outcome == AuthorityOutcome.COVERED_BY_ACTIVE_DECISION:
-            bad = [
-                d for d in outcome.referenced_decision_ids if d not in decisions_by_id
+            decision_ids = list(outcome.referenced_decision_ids)
+            authority_refs = [
+                (ref or "").strip()
+                for ref in outcome.authority_refs
+                if (ref or "").strip()
             ]
-            if bad:
+            bad_decisions = [
+                d for d in decision_ids if d not in decisions_by_id
+            ]
+            bad_refs = _resolve_authority_refs(
+                o, authority_refs, decisions_by_id, baseline_ids
+            )
+            if bad_decisions or bad_refs:
                 o.handoff(
-                    f"coverage claim for {issue_id} references non-ACTIVE or "
-                    f"nonexistent decisions {bad}; failing closed",
+                    f"coverage claim for {issue_id} references stale, "
+                    f"superseded or nonexistent authority (decisions: "
+                    f"{bad_decisions}, refs: {bad_refs}); failing closed",
                     result_status=ResultStatus.NEEDS_HUMAN_DECISION.value,
                 )
                 return int(ExitCode.HUMAN_HANDOFF)
-            covered.append((outcome, outcome.referenced_decision_ids, outcome.rationale))
+            covered.append((outcome, decision_ids, authority_refs, outcome.rationale))
         elif outcome.outcome == AuthorityOutcome.NEEDS_NEW_HUMAN_DECISION:
             candidate = outcome.decision_candidate
             error = _validate_candidate_packet(
@@ -866,26 +933,31 @@ def resolve_need_human_issues(
     # All outcomes validated — now apply the routing.
     if covered:
         log = o.store.load_issues()
-        for outcome, decision_ids, rationale in covered:
+        for outcome, decision_ids, authority_refs, rationale in covered:
             for issue in log.issues:
                 if issue.id == outcome.issue_id:
                     # Solution coverage gap, not missing Human semantics:
                     # back to OPEN for the normal correction path. The
                     # original reviewer category/provenance stays intact;
-                    # the durable covered_by_decisions marker keeps later
-                    # phase-entry re-checks from re-flipping the issue,
-                    # and the routing note records the finding.
+                    # the durable covered_by_decisions / covered_by_authority
+                    # markers keep later phase-entry re-checks from
+                    # re-flipping the issue, and the routing note records
+                    # the proven authority references.
                     issue.status = IssueStatus.OPEN
                     issue.covered_by_decisions = list(decision_ids)
+                    issue.covered_by_authority = list(
+                        dict.fromkeys(decision_ids + authority_refs)
+                    )
+                    proven = ", ".join(issue.covered_by_authority) or "(none)"
                     issue.resolution = (
                         "human authority check: semantics already decided by "
-                        + ", ".join(decision_ids)
-                        + " — routed as a solution coverage gap"
+                        f"{proven} — routed as a solution coverage gap"
                     )
                     o.event(
                         "ISSUE_COVERED_BY_DECISION",
                         issue_id=issue.id,
                         decision_ids=decision_ids,
+                        authority_refs=authority_refs,
                     )
                     break
         o.store.save_issues(log)

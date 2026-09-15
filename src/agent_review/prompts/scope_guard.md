@@ -48,6 +48,12 @@ Produce a structured scope assessment with exactly one verdict:
   independently deliverable outcomes.
 - Do NOT decide scope by file count, LOC, module count or estimated
   coding time — these are weak signals at most.
+- Risk and compositeness are DIFFERENT axes: a small, coherent,
+  single-outcome change stays BOUNDED even when its correctness, data,
+  security or operability risk is HIGH. High risk may justify deeper
+  review attention, never DECOMPOSITION_REQUIRED by itself. Only
+  multiple independent decision / acceptance / deliverable boundaries
+  make a task composite.
 - Do NOT invent Requirement decisions. If the classification genuinely
   depends on a Requirement ambiguity you cannot resolve from the request
   text, classify CONSERVATIVELY (choose the verdict you can defend) and

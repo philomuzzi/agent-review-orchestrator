@@ -34,10 +34,12 @@ def events_of(o) -> list[dict]:
     ]
 
 
-def coverage_entry(criterion, status, issue_title=None):
+def coverage_entry(criterion, status, issue_title=None, acceptance_id=None):
     entry = {"criterion": criterion, "status": status}
     if issue_title:
         entry["issue_title"] = issue_title
+    if acceptance_id:
+        entry["acceptance_id"] = acceptance_id
     return entry
 
 
@@ -55,7 +57,7 @@ def initial_with(issue, coverage):
     )
 
 
-# --- acceptance coverage (design §40) ---------------------------------------------
+# --- acceptance coverage (design §40 + RC1 B403) -------------------------------------
 
 
 def test_acceptance_coverage_recorded_and_persisted(repo):
@@ -66,8 +68,43 @@ def test_acceptance_coverage_recorded_and_persisted(repo):
                 initial_with(
                     issue,
                     [
-                        coverage_entry("A01 pause semantics", "PASS"),
-                        coverage_entry("A02 in-flight work safety", "FAIL", "validation evidence gap"),
+                        coverage_entry(
+                            "原始请求的期望行为已交付：给同步任务增加暂停能力",
+                            "PASS",
+                            acceptance_id="A001",
+                        ),
+                        coverage_entry(
+                            "验证证据具备区分力",
+                            "FAIL",
+                            "validation evidence gap",
+                            acceptance_id="A002",
+                        ),
+                    ],
+                )
+            ]
+        }
+    )
+    o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
+    # The scripted coverage references A002 which is not in the baseline
+    # (A001 only) -> unknown id fails closed.
+    assert o.run() == int(ExitCode.FAILED)
+    assert "unknown: A002" in (o.state.error or "")
+
+
+def test_acceptance_coverage_exact_baseline_ids_persisted(repo):
+    issue = blocker(title="validation evidence gap")
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                initial_with(
+                    issue,
+                    [
+                        coverage_entry(
+                            "原始请求的期望行为已交付：给同步任务增加暂停能力",
+                            "FAIL",
+                            "validation evidence gap",
+                            acceptance_id="A001",
+                        )
                     ],
                 )
             ]
@@ -76,10 +113,7 @@ def test_acceptance_coverage_recorded_and_persisted(repo):
     o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
     assert o.run() == int(ExitCode.DONE)
     stored = o.store.load_acceptance_coverage()
-    assert [e.criterion for e in stored] == [
-        "A01 pause semantics",
-        "A02 in-flight work safety",
-    ]
+    assert [(e.acceptance_id, e.status) for e in stored] == [("A001", "FAIL")]
     events = [e["event"] for e in events_of(o)]
     assert "ACCEPTANCE_COVERAGE_RECORDED" in events
 
@@ -96,19 +130,70 @@ def test_coverage_fail_without_matching_blocking_issue_fails_closed(repo):
     assert "must reference the exact title of a BLOCKING issue" in (o.state.error or "")
 
 
-def test_coverage_duplicate_criteria_fail_closed(repo):
+def test_coverage_duplicate_ids_fail_closed(repo):
     issue = blocker()
     bad = initial_with(
         issue,
         [
-            coverage_entry("A01", "PASS"),
-            coverage_entry("A01", "PASS"),
+            coverage_entry(
+                "原始请求的期望行为已交付：给同步任务增加暂停能力",
+                "PASS",
+                acceptance_id="A001",
+            ),
+            coverage_entry(
+                "duplicate id",
+                "PASS",
+                acceptance_id="A001",
+            ),
         ],
     )
     codex = FakeCodexAdapter(script={"initial_review": [bad, bad]})
     o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
     assert o.run() == int(ExitCode.FAILED)
-    assert "duplicate criterion" in (o.state.error or "")
+    assert "duplicate acceptance_id" in (o.state.error or "")
+
+
+def test_coverage_missing_baseline_id_fails_closed(repo):
+    """B403: coverage omitting a baseline criterion cannot pass — and
+    can never produce a false APPROVED."""
+    issue = blocker()
+    wrong_id = initial_with(
+        issue,
+        [
+            coverage_entry(
+                "not in the baseline", "PASS", acceptance_id="A002"
+            )
+        ],
+    )
+    codex = FakeCodexAdapter(script={"initial_review": [wrong_id, wrong_id]})
+    o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
+    assert o.run() == int(ExitCode.FAILED)
+    assert "must account for exactly the current Contract Acceptance Baseline" in (
+        o.state.error or ""
+    )
+    assert "missing: A001" in (o.state.error or "")
+    assert "unknown: A002" in (o.state.error or "")
+
+
+def test_initial_coverage_empty_on_rc1_contract_fails_closed(repo):
+    """B403 unit boundary: an RC1 contract with ZERO reported coverage is
+    invalid (no empty-baseline false-APPROVED path)."""
+    from agent_review.models import InitialReviewResult
+    from agent_review.phases.review import (
+        _validate_initial_coverage_ids,
+        effective_acceptance_baseline,
+    )
+
+    o = make_orchestrator(repo, ui=ScriptedUI(interactive=False))
+    while o.state.phase.value != "INITIAL_REVIEW":
+        o.step()
+    baseline = effective_acceptance_baseline(o)
+    assert [c.id for c in baseline] == ["A001"]
+    empty = InitialReviewResult(issues=[], summary="no coverage")
+    import pytest
+
+    with pytest.raises(Exception, match="exactly the current Contract"):
+        _validate_initial_coverage_ids(o, baseline, empty)
 
 
 def test_coverage_fail_entry_model_requires_issue_title():
@@ -129,56 +214,22 @@ def test_coverage_status_enum_rejects_unknown():
         AcceptanceCoverageEntry(criterion="A01", status="MAYBE")
 
 
-# --- final review completeness (design §44) ----------------------------------------
-
-
-def final_flow_scripts(initial_issue, initial_coverage, final_payload):
-    return {
-        "initial_review": [initial_with(initial_issue, initial_coverage)],
-        # closure unresolved with explicit ABLATION recommendation keeps
-        # the V0.2-style path to FINAL_REVIEW alive for this fixture.
-        "closure_review": [
-            json.dumps(
-                {
-                    "issue_outcomes": [
-                        {
-                            "issue_id": "R001",
-                            "resolution": "UNRESOLVED",
-                            "note": "over-design; ablate to minimum sufficient design",
-                            "correction_action": "ABLATION",
-                        }
-                    ],
-                    "new_issues": [],
-                    "summary": "closure",
-                }
-            )
-        ],
-        "final_review": [json.dumps(final_payload)],
-    }
+# --- final review completeness (design §44 + RC1 B403) ------------------------------
 
 
 def test_final_review_must_reaccount_every_criterion(repo):
+    """RC1 B403: exact-ID equality against the current baseline."""
     issue = blocker(title="validation evidence gap")
     final = {
         "satisfies_requirement": True,
         "unresolved_issue_ids": [],
         "issues": [],
+        # A001 silently replaced by an unknown id
         "acceptance_coverage": [
-            coverage_entry("A01 pause semantics", "PASS"),
-            # A02 silently disappeared
+            coverage_entry("not in the baseline", "PASS", acceptance_id="A002")
         ],
         "summary": "ready",
     }
-    codex = FakeCodexAdapter(
-        script=final_flow_scripts(
-            issue,
-            [
-                coverage_entry("A01 pause semantics", "PASS"),
-                coverage_entry("A02 in-flight work safety", "FAIL", "validation evidence gap"),
-            ],
-            final,
-        )
-    )
     bad_final = json.dumps(final)
     codex = FakeCodexAdapter(
         script={
@@ -186,8 +237,12 @@ def test_final_review_must_reaccount_every_criterion(repo):
                 initial_with(
                     issue,
                     [
-                        coverage_entry("A01 pause semantics", "PASS"),
-                        coverage_entry("A02 in-flight work safety", "FAIL", "validation evidence gap"),
+                        coverage_entry(
+                            "原始请求的期望行为已交付：给同步任务增加暂停能力",
+                            "FAIL",
+                            "validation evidence gap",
+                            acceptance_id="A001",
+                        )
                     ],
                 )
             ],
@@ -207,13 +262,13 @@ def test_final_review_must_reaccount_every_criterion(repo):
                     }
                 )
             ],
-            "final_review": [bad_final, bad_final],
+            "final_review": [bad_final],
         }
     )
     o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
     assert o.run() == int(ExitCode.FAILED)
-    assert "must re-account every criterion" in (o.state.error or "")
-    assert "A02 in-flight work safety" in (o.state.error or "")
+    assert "must re-account every acceptance id" in (o.state.error or "")
+    assert "missing: A001" in (o.state.error or "")
 
 
 def test_final_review_complete_coverage_passes(repo):
@@ -223,8 +278,11 @@ def test_final_review_complete_coverage_passes(repo):
         "unresolved_issue_ids": [],
         "issues": [],
         "acceptance_coverage": [
-            coverage_entry("A01 pause semantics", "PASS"),
-            coverage_entry("A02 in-flight work safety", "PASS"),
+            coverage_entry(
+                "原始请求的期望行为已交付：给同步任务增加暂停能力",
+                "PASS",
+                acceptance_id="A001",
+            )
         ],
         "summary": "ready",
     }
@@ -234,8 +292,12 @@ def test_final_review_complete_coverage_passes(repo):
                 initial_with(
                     issue,
                     [
-                        coverage_entry("A01 pause semantics", "PASS"),
-                        coverage_entry("A02 in-flight work safety", "FAIL", "validation evidence gap"),
+                        coverage_entry(
+                            "原始请求的期望行为已交付：给同步任务增加暂停能力",
+                            "FAIL",
+                            "validation evidence gap",
+                            acceptance_id="A001",
+                        )
                     ],
                 )
             ],
@@ -321,30 +383,97 @@ def test_regression_defaults_to_introduced_by_correction(repo):
     assert issues["R002"].origin.value == "INTRODUCED_BY_CORRECTION"
 
 
-def test_unexplained_late_blocker_is_downgraded(repo):
+def test_unexplained_late_blocker_fails_closed(repo):
+    """RC1 B401: missing provenance is a protocol failure (repair, then
+    FAILED) — never a severity downgrade and never a false APPROVED."""
     late = blocker(9, title="unexplained taste blocker").model_dump()
-    codex = FakeCodexAdapter(script=late_blocker_flow(late))
+    bad = late_blocker_flow(late)["closure_review"][0]
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [bad],
+            "closure_review:repair": [bad],
+        }
+    )
+    o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
+    assert o.run() == int(ExitCode.FAILED)
+    assert o.state.result_status == "FAILED"
+    assert "must record origin" in (o.state.error or "")
+    # The malformed blocker never became a NON_BLOCKING issue: no issue
+    # was ingested from the invalid packet at all.
+    assert all(i.id != "R002" for i in o.store.load_issues().issues)
+
+
+def test_unexplained_late_blocker_repaired_once_converges(repo):
+    """The repair path works: the re-emitted packet carries provenance
+    and the blocker stays BLOCKING."""
+    explained = blocker(9, title="late but explained").model_dump()
+    explained["origin"] = "NEW_EVIDENCE"
+    explained["correction_action"] = "FOCUSED_REVISION"
+    explained["change_scope"] = ["verification_plan"]
+    repaired = late_blocker_flow(explained)["closure_review"][0]
+    bad = late_blocker_flow(blocker(9, title="late but explained").model_dump())["closure_review"][0]
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [bad],
+            "closure_review:repair": [repaired],
+        }
+    )
     o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
     assert o.run() == int(ExitCode.DONE)
     issues = {i.id: i for i in o.store.load_issues().issues}
-    assert issues["R002"].severity.value == "NON_BLOCKING"
-    assert "downgraded" in (issues["R002"].resolution or "")
+    assert issues["R002"].severity.value == "BLOCKING"
+    assert issues["R002"].origin.value == "NEW_EVIDENCE"
 
 
-def test_previous_review_miss_without_explanation_downgraded(repo):
+def test_previous_review_miss_without_explanation_fails_closed(repo):
     late = blocker(9, title="severe miss without explanation").model_dump()
     late["origin"] = "PREVIOUS_REVIEW_MISS"
     # why_not_detected_initially intentionally absent
-    codex = FakeCodexAdapter(script=late_blocker_flow(late))
+    bad = late_blocker_flow(late)["closure_review"][0]
+    codex = FakeCodexAdapter(
+        script={
+            "initial_review": [
+                json.dumps({"issues": [make_blocking_issue(1).model_dump()], "summary": "one"})
+            ],
+            "closure_review": [bad],
+            "closure_review:repair": [bad],
+        }
+    )
     o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
-    assert o.run() == int(ExitCode.DONE)
+    assert o.run() == int(ExitCode.FAILED)
+    assert "why_not_detected_initially" in (o.state.error or "")
+
+
+def test_non_blocking_late_issue_needs_no_provenance(repo):
+    """B401: NON_BLOCKING late issues do not require blocker provenance."""
+    from agent_review.models import IssueSeverity
+
+    late = blocker(9, title="minor taste note").model_copy(
+        update={"severity": IssueSeverity.NON_BLOCKING}
+    )
+    flow = late_blocker_flow(late.model_dump())
+    codex = FakeCodexAdapter(script=flow)
+    o = make_orchestrator(repo, codex=codex, ui=ScriptedUI(interactive=False))
+    code = o.run()
     issues = {i.id: i for i in o.store.load_issues().issues}
     assert issues["R002"].severity.value == "NON_BLOCKING"
+    assert "must record origin" not in (o.state.error or "")
+    assert code != int(ExitCode.FAILED)
 
 
 def test_final_new_blocker_with_origin_and_focused_fix_converges(repo):
     """c454-P2 remedy: a late blocker WITH provenance gets one targeted
-    focused revision instead of a dead end at zero full-revision budget."""
+    focused revision instead of a dead end at zero full-revision budget.
+    RC1 B404: the scripted focused proposal echoes the current design
+    and changes ONLY the in-scope canonical section."""
+    from tests.unit.test_m3_human_gate import default_proposal_dict
+
     late = blocker(9, title="mixed-error no-data case lacks a test").model_dump()
     late["origin"] = "PREVIOUS_REVIEW_MISS"
     late["why_not_detected_initially"] = (
@@ -352,15 +481,20 @@ def test_final_new_blocker_with_origin_and_focused_fix_converges(repo):
     )
     late["correction_action"] = "FOCUSED_REVISION"
     late["focus_area"] = "VALIDATION"
-    late["change_scope"] = ["test-matrix"]
+    late["change_scope"] = ["verification_plan"]
+
+    echoed = default_proposal_dict()
+    # The ABLATION step ran first in this flow, so the CURRENT proposal
+    # carries the ablated summary; the focused fix echoes it verbatim.
+    echoed["summary"] = "Ablated minimal design: 给同步任务增加暂停能力"
+    echoed["verification_plan"] = [
+        "mixed-error no-data case now asserted before retry exhaustion"
+    ]
 
     def focused_result(ids, scope, changed):
         return json.dumps(
             {
-                "proposal": {
-                    "summary": "focused fix",
-                    "explicitly_unchanged": ["everything else"],
-                },
+                "proposal": echoed,
                 "target_issue_ids": ids,
                 "allowed_change_scope": scope,
                 "preserved_invariants": ["ACTIVE Human Decisions"],
@@ -374,7 +508,7 @@ def test_final_new_blocker_with_origin_and_focused_fix_converges(repo):
     pi = FakePiAdapter(
         script={
             "focused_revise": [
-                focused_result(["R001", "R002"], ["test-matrix"], ["test-matrix"])
+                focused_result(["R001", "R002"], ["verification_plan"], ["verification_plan"])
             ]
         }
     )
@@ -441,6 +575,28 @@ def test_closure_prompt_carries_differential_and_provenance_contract():
 def test_final_prompt_carries_readiness_and_completeness_contract():
     text = open(PROMPTS_DIR + "final_review.md", encoding="utf-8").read()
     assert "READINESS review" in text
-    assert "may not silently disappear" in text
+    assert "never silently disappear" in text
+    assert "acceptance_id" in text
     assert "origin" in text
     assert "correction_recommendations" in text
+
+
+def test_prompts_expose_rc1_protocols():
+    """RC1: the Agent-facing prompts expose the candidate_id dependency
+    protocol, the ID-based acceptance coverage and the correction-delta
+    evidence."""
+    discover = open(PROMPTS_DIR + "discover.md", encoding="utf-8").read()
+    assert "candidate_id" in discover
+    assert "depends_on" in discover
+    investigate = open(PROMPTS_DIR + "investigate.md", encoding="utf-8").read()
+    assert "candidate_id" in investigate
+    initial = open(PROMPTS_DIR + "initial_review.md", encoding="utf-8").read()
+    assert "acceptance_id" in initial
+    assert "acceptance_criteria" in initial
+    closure = open(PROMPTS_DIR + "closure_review.md", encoding="utf-8").read()
+    assert "{{CORRECTION_DELTA}}" in closure
+    assert "actual_changed_sections" in closure
+    focused = open(PROMPTS_DIR + "focused_revision.md", encoding="utf-8").read()
+    assert "canonical section names" in focused
+    authority = open(PROMPTS_DIR + "human_authority_check.md", encoding="utf-8").read()
+    assert "authority_refs" in authority

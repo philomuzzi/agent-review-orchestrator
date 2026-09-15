@@ -35,6 +35,8 @@ from agent_review.models import (
     IssueSeverity,
     IssueStatus,
     Phase,
+    design_actual_changed_sections,
+    section_within_scope,
 )
 from agent_review.rendering import render_proposal
 
@@ -98,6 +100,7 @@ def run(o) -> ExitCode | None:
         "FOCUSED_REVISION_STARTED",
         targets=target_ids,
         allowed_scope=allowed_scope or None,
+        scope_mode=("explicit" if allowed_scope else "semantic"),
     )
 
     result = o.agent_call(
@@ -123,11 +126,57 @@ def run(o) -> ExitCode | None:
                 "focused contract forbids unrelated redesign"
             )
 
+    # V0.3-RC1 B404: containment validates the ACTUAL serialized proposal
+    # delta — Orchestrator-owned truth. The Agent's self-reported
+    # changed_sections is explanation/audit only and can NEVER bypass
+    # this check (an omitted section is still a violation).
+    actual_changed_sections = design_actual_changed_sections(
+        proposal, result.proposal
+    )
+    if allowed_scope:
+        outside_actual = [
+            section
+            for section in actual_changed_sections
+            if not section_within_scope(section, allowed_scope)
+        ]
+        if outside_actual:
+            raise AgentError(
+                "focused revision actual proposal delta is outside the "
+                f"allowed change scope {allowed_scope}: {outside_actual}; "
+                "agent-reported changed_sections are not the containment "
+                "source of truth (B404)"
+            )
+    else:
+        # Explicitly distinguished from an empty explicit scope: a
+        # semantic scope means no mechanical containment exists.
+        o.event(
+            "FOCUSED_REVISION_SEMANTIC_SCOPE",
+            actual_changed_sections=actual_changed_sections,
+        )
+
     # Persist the focused proposal; keep the previous one in history/.
-    o.store.archive_proposal("superseded by focused revision")
+    archived_path = o.store.archive_proposal("superseded by focused revision")
     result.proposal.based_on_task_revision = o.state.task_revision
     o.store.save_proposal(result.proposal)
     o.store.write_text("proposal.md", render_proposal(result.proposal))
+    # B404: deterministic correction-delta evidence for Closure Review.
+    from agent_review.phases.review import save_correction_delta
+
+    save_correction_delta(
+        o,
+        {
+            "mechanism": "FOCUSED_REVISION",
+            "target_issue_ids": list(result.target_issue_ids),
+            "previous_proposal_snapshot": str(archived_path)
+            if archived_path
+            else None,
+            "actual_changed_sections": actual_changed_sections,
+            "reported_changed_sections": list(result.changed_sections),
+            "allowed_change_scope": list(allowed_scope),
+            "preserved_invariants": list(result.preserved_invariants),
+            "containment": "explicit" if allowed_scope else "semantic",
+        },
+    )
     o.store.write_text(
         "focused-revision.md",
         (
@@ -165,6 +214,7 @@ def run(o) -> ExitCode | None:
         "FOCUSED_REVISION_COMPLETED",
         targets=len(result.target_issue_ids),
         changed_sections=len(result.changed_sections),
+        actual_changed_sections=len(actual_changed_sections),
     )
     o.transition(Phase.CLOSURE_REVIEW)
     return None

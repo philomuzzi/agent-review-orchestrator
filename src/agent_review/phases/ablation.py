@@ -46,11 +46,36 @@ def run(o) -> ExitCode | None:
         lambda: o.pi.ablate(o.state, contract, proposal, unresolved),
     )
 
-    o.store.archive_proposal(f"superseded by ablation round {o.state.round}")
+    archived_path = o.store.archive_proposal(
+        f"superseded by ablation round {o.state.round}"
+    )
     result.proposal.based_on_task_revision = o.state.task_revision
     o.store.save_proposal(result.proposal)
     o.store.write_text("proposal.md", render_proposal(result.proposal))
     o.store.write_text("ablation.md", render_ablation(result))
+
+    # B404: deterministic correction-delta evidence for Closure-style
+    # verification (ablation proceeds to FINAL_REVIEW, which also
+    # receives this persisted context via the contract/proposal).
+    from agent_review.models import design_actual_changed_sections
+    from agent_review.phases.review import save_correction_delta
+
+    save_correction_delta(
+        o,
+        {
+            "mechanism": "ABLATION",
+            "target_issue_ids": [i.id for i in unresolved],
+            "previous_proposal_snapshot": str(archived_path)
+            if archived_path
+            else None,
+            "actual_changed_sections": design_actual_changed_sections(
+                proposal, result.proposal
+            ),
+            "reported_changed_sections": list(result.removed),
+            "allowed_change_scope": [],
+            "containment": "none (ablation)",
+        },
+    )
 
     by_id = {i.id: i for i in log.issues}
     for addressed in result.addressed_issues:

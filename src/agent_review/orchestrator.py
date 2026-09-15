@@ -313,7 +313,9 @@ class Orchestrator:
             for issue in self.store.load_issues().issues:
                 if (
                     issue.status.value == "NEED_HUMAN"
-                    and not issue.covered_by_decisions
+                    and not (
+                        issue.covered_by_decisions or issue.covered_by_authority
+                    )
                 ):
                     return ResultStatus.NEEDS_HUMAN_DECISION.value
         except Exception:

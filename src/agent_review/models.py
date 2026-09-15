@@ -164,6 +164,211 @@ def option_alias_violation(options) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# V0.3-RC1 B404: canonical design-section vocabulary.
+#
+# Focused Revision containment validates the ACTUAL serialized proposal
+# delta, not the Agent's self-reported ``changed_sections``. The delta is
+# computed over the top-level DesignResult fields that carry design
+# semantics; ``allowed_change_scope`` entries from reviewer issues are
+# matched against these canonical names after normalization
+# (case/whitespace/hyphen-insensitive), so prompts instruct reviewers to
+# use the canonical section names.
+# ---------------------------------------------------------------------------
+
+DESIGN_TEXT_SECTIONS: tuple[str, ...] = (
+    "summary",
+    "current_flow",
+    "proposed_flow",
+)
+
+DESIGN_LIST_SECTIONS: tuple[str, ...] = (
+    "changes",
+    "data_model_changes",
+    "interface_changes",
+    "state_lifecycle_changes",
+    "failure_handling",
+    "compatibility",
+    "risks",
+    "alternatives_considered",
+    "verification_plan",
+    "explicitly_unchanged",
+)
+
+CHANGE_MAP_SECTIONS: tuple[str, ...] = (
+    "affected_components",
+    "data_changes",
+    "api_changes",
+    "config_changes",
+    "behavior_changes",
+    "unchanged_behaviors",
+)
+
+
+def normalize_section_name(name: str) -> str:
+    """Canonical comparison form for design section names (B404)."""
+    return re.sub(r"[\s\-]+", "_", name.strip().lower())
+
+
+def _normalized_str_list(items: list[str]) -> list[str]:
+    return sorted(s.strip() for s in items if s.strip())
+
+
+def design_actual_changed_sections(old, new) -> list[str]:
+    """Deterministic structural delta between two DesignResults (B404).
+
+    Returns the canonical section names whose serialized content
+    differs (order-insensitive for list fields; whitespace-normalized).
+    This is Orchestrator-owned truth — Agent self-report never replaces
+    it for containment decisions.
+    """
+    changed: list[str] = []
+    for field in DESIGN_TEXT_SECTIONS:
+        if (getattr(old, field) or "").strip() != (getattr(new, field) or "").strip():
+            changed.append(field)
+    for field in DESIGN_LIST_SECTIONS:
+        if _normalized_str_list(getattr(old, field)) != _normalized_str_list(
+            getattr(new, field)
+        ):
+            changed.append(field)
+    for sub in CHANGE_MAP_SECTIONS:
+        if _normalized_str_list(getattr(old.change_map, sub)) != _normalized_str_list(
+            getattr(new.change_map, sub)
+        ):
+            changed.append(f"change_map.{sub}")
+    return changed
+
+
+def section_within_scope(section: str, allowed_change_scope: list[str]) -> bool:
+    """Canonical-name containment check for one changed section (B404)."""
+    canonical = normalize_section_name(section)
+    return any(
+        normalize_section_name(entry) == canonical for entry in allowed_change_scope
+    )
+
+
+def enforce_late_blocker_provenance(issues) -> None:
+    """B401: a new BLOCKING issue from a LATE review phase fails closed
+    when required provenance is missing — it is NEVER downgraded to
+    NON_BLOCKING (a Reviewer protocol defect must not lower engineering
+    severity or manufacture a false PASS).
+
+    Deterministic compatibility default: a REGRESSION-categorized issue
+    is the canonical INTRODUCED_BY_CORRECTION case, so the origin is
+    filled mechanically when omitted.
+
+    Enforced at the review-result model boundary (so real agents get
+    protocol repair) and re-enforced by the orchestrator at ingest.
+    """
+    for issue in issues:
+        if issue.severity != IssueSeverity.BLOCKING:
+            continue
+        if issue.origin is None and issue.category == IssueCategory.REGRESSION:
+            issue.origin = NewIssueOrigin.INTRODUCED_BY_CORRECTION
+        if issue.origin is None:
+            raise ValueError(
+                f"late BLOCKING issue '{issue.title}' must record origin "
+                "(INTRODUCED_BY_CORRECTION | PREVIOUS_REVIEW_MISS | NEW_EVIDENCE | "
+                "DIRECTLY_REQUIRED_FOR_CLOSURE); missing provenance fails closed "
+                "and is never downgraded to NON_BLOCKING"
+            )
+        if (
+            issue.origin == NewIssueOrigin.PREVIOUS_REVIEW_MISS
+            and not (issue.why_not_detected_initially or "").strip()
+        ):
+            raise ValueError(
+                f"late BLOCKING issue '{issue.title}' with origin "
+                "PREVIOUS_REVIEW_MISS must explain why_not_detected_initially; "
+                "the packet is invalid and fails closed"
+            )
+
+
+def validate_candidate_dependency_packet(candidates, packet: str) -> None:
+    """B402: packet-local ``candidate_id`` dependency protocol.
+
+    Human candidates get an explicit packet-local identity the Agent
+    authors itself (``candidate_id``), and ``depends_on`` references
+    those ids — never the orchestrator's internal decision-key hash.
+    Unknown, self-referencing or cyclic dependencies are INVALID (fail
+    closed with an auditable reason); they never silently become
+    independent questions.
+
+    Compatibility rule: candidates with no ``depends_on`` may omit
+    ``candidate_id`` (identical to pre-RC1 independent packets);
+    dependency expression and references require the public protocol.
+    """
+    id_index: dict[str, int] = {}
+    for index, candidate in enumerate(candidates):
+        cid = (candidate.candidate_id or "").strip()
+        if not cid:
+            continue
+        if cid in id_index:
+            raise ValueError(
+                f"{packet}: duplicate candidate_id {cid!r}; candidate ids must "
+                "be unique within one Agent packet"
+            )
+        id_index[cid] = index
+    graph: dict[int, set[int]] = {}
+    for index, candidate in enumerate(candidates):
+        if not candidate.depends_on:
+            continue
+        cid = (candidate.candidate_id or "").strip()
+        if not cid:
+            raise ValueError(
+                f"{packet}: a candidate declaring depends_on must carry its own "
+                "non-empty candidate_id (public packet-local protocol)"
+            )
+        deps: set[int] = set()
+        for ref in candidate.depends_on:
+            ref = (ref or "").strip()
+            if not ref:
+                raise ValueError(
+                    f"{packet}: candidate {cid!r} declares an empty dependency "
+                    "reference"
+                )
+            if ref == cid:
+                raise ValueError(
+                    f"{packet}: candidate {cid!r} depends on itself; "
+                    "self-dependency is invalid"
+                )
+            if ref not in id_index:
+                raise ValueError(
+                    f"{packet}: candidate {cid!r} depends on unknown candidate_id "
+                    f"{ref!r}; unknown dependencies are invalid and never "
+                    "silently treated as independent"
+                )
+            deps.add(id_index[ref])
+        graph[index] = deps
+    # Deterministic cycle detection (iterative DFS in packet order).
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {i: WHITE for i in graph}
+    for start in sorted(graph):
+        if color[start] != WHITE:
+            continue
+        stack = [(start, iter(sorted(graph[start])))]
+        color[start] = GRAY
+        while stack:
+            node, edges = stack[-1]
+            advanced = False
+            for nxt in edges:
+                if nxt not in graph:
+                    continue
+                if color[nxt] == GRAY:
+                    raise ValueError(
+                        f"{packet}: candidate dependency cycle detected through "
+                        f"candidate_id {candidates[nxt].candidate_id!r}; cyclic "
+                        "dependencies are invalid and fail closed"
+                    )
+                if color[nxt] == WHITE:
+                    color[nxt] = GRAY
+                    stack.append((nxt, iter(sorted(graph[nxt]))))
+                    advanced = True
+                    break
+            if not advanced:
+                color[node] = BLACK
+                stack.pop()
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -455,6 +660,13 @@ class GateOption(BaseModel):
 
 
 class HumanCandidate(BaseModel):
+    # V0.3-RC1 B402: explicit packet-local identity the Agent authors and
+    # references. ``depends_on`` lists candidate ids from the SAME packet —
+    # never the orchestrator's internal decision-key hash (a real Agent
+    # has no stable way to know another candidate's generated key while
+    # producing one packet). Validation: see
+    # ``validate_candidate_dependency_packet``.
+    candidate_id: Optional[str] = None
     category: str
     question: str
     why: str = ""
@@ -466,7 +678,14 @@ class HumanCandidate(BaseModel):
     # A candidate may be deferred to a later gate ONLY when it declares
     # such a dependency on the current gate; independent candidates are
     # batched into the same gate.
+    # RC1 semantics: the Agent fills packet-local candidate ids here;
+    # the orchestrator resolves them to internal decision keys in
+    # ``depends_on_keys`` after packet validation.
     depends_on: list[str] = Field(default_factory=list)
+    # Orchestrator-owned resolution of ``depends_on`` candidate ids to
+    # internal stable decision keys (populated at collection time from
+    # the candidate's own packet; empty for independent candidates).
+    depends_on_keys: list[str] = Field(default_factory=list)
 
 
 class DiscoveryResult(BaseModel):
@@ -479,6 +698,13 @@ class DiscoveryResult(BaseModel):
     change_surface: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     human_candidates: list[HumanCandidate] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _candidate_packet_valid(self) -> "DiscoveryResult":
+        # B402: the candidate dependency protocol is validated at the
+        # packet boundary so real agents get protocol repair.
+        validate_candidate_dependency_packet(self.human_candidates, "discovery")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +797,12 @@ class InvestigationResult(BaseModel):
     unresolved_contradictions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
+    def _candidate_packet_valid(self) -> "InvestigationResult":
+        # B402: same packet-local dependency protocol as discovery.
+        validate_candidate_dependency_packet(self.human_candidates, "investigation")
+        return self
+
+    @model_validator(mode="after")
     def _supported_requires_evidence(self) -> "InvestigationResult":
         if self.root_cause_status == RootCauseStatus.SUPPORTED:
             if (not self.root_cause.strip()
@@ -587,6 +819,66 @@ class InvestigationResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Change contract (task.md)
 # ---------------------------------------------------------------------------
+
+
+# V0.3-RC1 B403: valid Requirement-Authority reference forms for a
+# Contract acceptance criterion. "REQUEST" = the original user request
+# (always resolvable); "D###" = an ACTIVE Human Decision id. Acceptance
+# ids ("A###") are deliberately NOT valid authority for the contract's
+# own criteria (an Agent writing a criterion into the Contract never
+# grants it Requirement Authority by itself).
+AUTHORITY_REF_PATTERN = re.compile(r"^(REQUEST|D\d{3,})$")
+ACCEPTANCE_ID_PATTERN = re.compile(r"^A\d{3,}$")
+
+
+class AcceptanceCriterion(BaseModel):
+    """B403: one authoritative acceptance criterion owned by the Change
+    Contract (the current effective Acceptance Baseline for ONE task
+    revision).
+
+    Requirements:
+
+    - ``id`` is stable within the task revision (A001, A002, ...);
+    - every authoritative criterion carries mechanically valid
+      Requirement-Authority provenance (REQUEST or an ACTIVE Human
+      Decision id) — an Agent merely writing a criterion into the
+      Contract grants no authority;
+    - assumptions / open questions never enter this set.
+
+    When new evidence legitimately changes Requirement understanding,
+    the existing task_revision / contract-rebuild mechanism produces a
+    NEW baseline for the new revision; reviewers never silently mutate
+    the current one.
+    """
+
+    id: str
+    criterion: str
+    authority_refs: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _criterion_shape(self) -> "AcceptanceCriterion":
+        if not ACCEPTANCE_ID_PATTERN.fullmatch(self.id.strip()):
+            raise ValueError(
+                f"acceptance criterion id must match A### (e.g. A001), "
+                f"got {self.id!r}"
+            )
+        self.id = self.id.strip()
+        if not self.criterion.strip():
+            raise ValueError(f"acceptance criterion {self.id} requires text")
+        if not self.authority_refs:
+            raise ValueError(
+                f"acceptance criterion {self.id} requires authority provenance "
+                "(REQUEST and/or ACTIVE Human Decision ids); an Agent-written "
+                "criterion without authority is not authoritative"
+            )
+        for ref in self.authority_refs:
+            ref = (ref or "").strip()
+            if not AUTHORITY_REF_PATTERN.fullmatch(ref):
+                raise ValueError(
+                    f"acceptance criterion {self.id} has unknown authority ref "
+                    f"{ref!r}; valid forms: REQUEST or D### (ACTIVE decision id)"
+                )
+        return self
 
 
 class Assumption(BaseModel):
@@ -608,12 +900,24 @@ class ChangeContract(BaseModel):
     out_of_scope: list[str] = Field(default_factory=list)
     root_cause: str = ""
     based_on_task_revision: int = 1
+    # V0.3-RC1 B403: the CURRENT effective Acceptance Baseline owned by
+    # the Contract. Empty ONLY for legacy pre-RC1 persisted sessions
+    # (explicit compatibility rule: see review.effective_acceptance_baseline);
+    # every new RC1 session builds a non-empty baseline in INTAKE.
+    acceptance_criteria: list[AcceptanceCriterion] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _require_core_fields(self) -> "ChangeContract":
         for name in ("user_intent", "current_behavior", "desired_behavior"):
             if not getattr(self, name).strip():
                 raise ValueError(f"ChangeContract requires non-empty {name}")
+        ids = [criterion.id for criterion in self.acceptance_criteria]
+        if len(ids) != len(set(ids)):
+            raise ValueError(
+                "ChangeContract acceptance criterion ids must be unique within "
+                f"one task revision; duplicates: "
+                + ", ".join(sorted({i for i in ids if ids.count(i) > 1}))
+            )
         return self
 
 
@@ -757,6 +1061,11 @@ class Issue(BaseModel):
     # re-flip it NEED_HUMAN; reset on ingest so the reviewer can never
     # forge coverage.
     covered_by_decisions: list[str] = Field(default_factory=list)
+    # V0.3-RC1 B405: the FULL resolved authority-reference list (decision
+    # ids + acceptance ids + REQUEST) proving coverage by the current
+    # effective Requirement Authority. Auditable routing metadata; reset
+    # on ingest together with covered_by_decisions.
+    covered_by_authority: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _blocking_requires_acceptance(self) -> "Issue":
@@ -768,16 +1077,22 @@ class Issue(BaseModel):
 
 
 class AcceptanceCoverageEntry(BaseModel):
-    """V0.3 C4 §40: explicit accounting for one acceptance criterion.
+    """V0.3 C4 §40 + RC1 B403: explicit accounting for one acceptance
+    criterion of the CURRENT Contract baseline.
 
-    The invariant is that acceptance criteria may not silently
-    disappear from review: a FAIL entry must name the BLOCKING issue
-    (by exact title) that carries the criterion in the same result.
+    Coverage is reported by stable acceptance ID (``acceptance_id``);
+    ``criterion`` is the display echo. The invariant is that acceptance
+    criteria may not silently disappear from review: a FAIL entry must
+    name the BLOCKING issue (by exact title) that carries the criterion
+    in the same result. ``acceptance_id`` is optional only for legacy
+    pre-RC1 persisted coverage (ids are assigned in recorded order by
+    the compatibility rule).
     """
 
     criterion: str
     status: str  # PASS | FAIL
     issue_title: Optional[str] = None
+    acceptance_id: Optional[str] = None
     note: str = ""
 
     @model_validator(mode="after")
@@ -789,6 +1104,15 @@ class AcceptanceCoverageEntry(BaseModel):
             )
         if not self.criterion.strip():
             raise ValueError("acceptance coverage criterion must be non-empty")
+        if self.acceptance_id is not None and not ACCEPTANCE_ID_PATTERN.fullmatch(
+            self.acceptance_id.strip()
+        ):
+            raise ValueError(
+                f"acceptance coverage acceptance_id must match A###, "
+                f"got {self.acceptance_id!r}"
+            )
+        if self.acceptance_id is not None:
+            self.acceptance_id = self.acceptance_id.strip()
         if self.status == "FAIL" and not (self.issue_title or "").strip():
             raise ValueError(
                 f"acceptance criterion {self.criterion!r} marked FAIL must "
@@ -849,13 +1173,22 @@ class ClosureReviewResult(BaseModel):
     new_issues: list[Issue] = Field(default_factory=list)
     summary: str = ""
 
+    @model_validator(mode="after")
+    def _late_blockers_require_provenance(self) -> "ClosureReviewResult":
+        # B401: enforced at the model boundary so real agents receive
+        # protocol repair; a late BLOCKING issue without valid provenance
+        # fails closed instead of being downgraded.
+        enforce_late_blocker_provenance(self.new_issues)
+        return self
+
 
 class FinalReviewResult(BaseModel):
     satisfies_requirement: bool = False
     unresolved_issue_ids: list[str] = Field(default_factory=list)
     issues: list[Issue] = Field(default_factory=list)
     # V0.3 C4 §44: readiness review re-accounts every acceptance
-    # criterion from the initial review (completeness invariant).
+    # criterion from the current Contract baseline (completeness
+    # invariant; exact-ID equality, RC1 B403).
     acceptance_coverage: list[AcceptanceCoverageEntry] = Field(default_factory=list)
     # V0.3 C2: next-step recommendations for the blockers listed in
     # unresolved_issue_ids (defaults to FULL_REVISION when absent).
@@ -863,6 +1196,12 @@ class FinalReviewResult(BaseModel):
         default_factory=list
     )
     summary: str = ""
+
+    @model_validator(mode="after")
+    def _late_blockers_require_provenance(self) -> "FinalReviewResult":
+        # B401: same fail-closed contract as CLOSURE_REVIEW.
+        enforce_late_blocker_provenance(self.issues)
+        return self
 
 
 class PassResult(BaseModel):
@@ -1058,16 +1397,23 @@ class IssueAuthorityOutcome(BaseModel):
     issue_id: str
     outcome: AuthorityOutcome
     referenced_decision_ids: list[str] = Field(default_factory=list)
+    # V0.3-RC1 B405: coverage may also reference the CURRENT effective
+    # Requirement Authority beyond decisions: "A###" (an acceptance
+    # criterion of the current Contract baseline) and "REQUEST" (the
+    # original user request). Every reference must resolve to persisted
+    # current-authority data; stale/superseded sources fail closed.
+    authority_refs: list[str] = Field(default_factory=list)
     rationale: str = ""
     decision_candidate: Optional[DecisionCandidate] = None
 
     @model_validator(mode="after")
     def _outcome_shape(self) -> "IssueAuthorityOutcome":
         if self.outcome == AuthorityOutcome.COVERED_BY_ACTIVE_DECISION:
-            if not self.referenced_decision_ids:
+            if not (self.referenced_decision_ids or self.authority_refs):
                 raise ValueError(
                     f"COVERED_BY_ACTIVE_DECISION for {self.issue_id} requires "
-                    "referenced_decision_ids"
+                    "referenced_decision_ids and/or authority_refs (D### / "
+                    "A### / REQUEST)"
                 )
             if not self.rationale.strip():
                 raise ValueError(

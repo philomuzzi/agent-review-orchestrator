@@ -15,6 +15,7 @@ from agent_review.agents.base import (
     run_with_protocol_repair,
 )
 from agent_review.models import (
+    AcceptanceCoverageEntry,
     AblationResult,
     AuthorityOutcome,
     ChangeContract,
@@ -36,6 +37,7 @@ from agent_review.models import (
     ScopeAssessment,
     ScopeVerdict,
     SessionState,
+    normalize_section_name,
 )
 
 
@@ -81,12 +83,50 @@ def default_focused_revision(
     issues: list[Issue],
     allowed_change_scope: list[str],
 ) -> FocusedRevisionResult:
+    """Deterministic default focused revision (RC1 B404-aware).
+
+    With an EXPLICIT allowed scope the fake mutates only sections that
+    canonically match the scope, so the orchestrator's actual-delta
+    containment holds by construction. With a semantic (empty) scope it
+    keeps the legacy minimal summary touch.
+    """
     addressed = [
         {"issue_id": i.id, "how_addressed": f"Focused fix applied for {i.title}."}
         for i in issues
     ]
     revised = proposal.model_copy(deep=True)
-    revised.summary = f"Focused revised design: {contract.user_intent}"
+    changed_sections: list[str] = []
+    if allowed_change_scope:
+        from agent_review.models import (
+            CHANGE_MAP_SECTIONS,
+            DESIGN_LIST_SECTIONS,
+            DESIGN_TEXT_SECTIONS,
+        )
+
+        for entry in allowed_change_scope:
+            canonical = normalize_section_name(entry)
+            if canonical in DESIGN_TEXT_SECTIONS:
+                setattr(
+                    revised,
+                    canonical,
+                    (getattr(revised, canonical) or "")
+                    + " (focused fix applied)",
+                )
+                changed_sections.append(entry)
+            elif canonical in DESIGN_LIST_SECTIONS:
+                items = list(getattr(revised, canonical))
+                items.append("Focused fix applied.")
+                setattr(revised, canonical, items)
+                changed_sections.append(entry)
+            elif canonical.startswith("change_map."):
+                sub = canonical.split(".", 1)[1]
+                if sub in CHANGE_MAP_SECTIONS:
+                    items = list(getattr(revised.change_map, sub))
+                    items.append("Focused fix applied.")
+                    setattr(revised.change_map, sub, items)
+                    changed_sections.append(entry)
+    else:
+        revised.summary = f"Focused revised design: {contract.user_intent}"
     return FocusedRevisionResult(
         proposal=revised,
         target_issue_ids=[i.id for i in issues],
@@ -95,7 +135,7 @@ def default_focused_revision(
             "ACTIVE Human Decisions preserved unchanged",
             "explicitly unchanged sections preserved",
         ],
-        changed_sections=list(allowed_change_scope),
+        changed_sections=changed_sections,
         issue_responses=addressed,
         notes="fake adapter default focused revision",
     )
@@ -162,9 +202,28 @@ def default_ablation(
     )
 
 
-def default_initial_review(proposal: DesignResult) -> InitialReviewResult:
+def default_initial_review(
+    contract: ChangeContract, proposal: DesignResult
+) -> InitialReviewResult:
+    """Deterministic default review (RC1 B403-aware).
+
+    A well-behaved reviewer accounts for the CURRENT Contract Acceptance
+    Baseline: the default reports one PASS entry per contract criterion
+    (by stable id). Legacy contracts without criteria get no invented
+    coverage — legacy flows must script it explicitly.
+    """
+    coverage = [
+        {
+            "acceptance_id": criterion.id,
+            "criterion": criterion.criterion,
+            "status": "PASS",
+        }
+        for criterion in contract.acceptance_criteria
+    ]
     return InitialReviewResult(
-        issues=[], summary="No blocking issues found against the Change Contract."
+        issues=[],
+        acceptance_coverage=coverage,
+        summary="No blocking issues found against the Change Contract.",
     )
 
 
@@ -356,11 +415,24 @@ class FakeCodexAdapter(ScriptedAdapter):
     def initial_review(
         self, state: SessionState, contract: ChangeContract, proposal: DesignResult
     ) -> InitialReviewResult:
-        return self._run(
-            "initial_review",
-            lambda: default_initial_review(proposal),
-            InitialReviewResult,
-        )
+        def build() -> InitialReviewResult:
+            return default_initial_review(contract, proposal)
+
+        result = self._run("initial_review", build, InitialReviewResult)
+        # RC1 B403 fixture compatibility: scripted results that predate
+        # the acceptance-id protocol get the baseline accounting a
+        # well-behaved reviewer would produce (all PASS). Explicitly
+        # scripted coverage is never modified.
+        if not result.acceptance_coverage and contract.acceptance_criteria:
+            result.acceptance_coverage = [
+                AcceptanceCoverageEntry(
+                    acceptance_id=criterion.id,
+                    criterion=criterion.criterion,
+                    status="PASS",
+                )
+                for criterion in contract.acceptance_criteria
+            ]
+        return result
 
     def closure_review(
         self,
@@ -368,6 +440,7 @@ class FakeCodexAdapter(ScriptedAdapter):
         contract: ChangeContract,
         proposal: DesignResult,
         issues: list[Issue],
+        correction_delta=None,
     ) -> ClosureReviewResult:
         def build() -> ClosureReviewResult:
             outcomes = [
@@ -399,7 +472,28 @@ class FakeCodexAdapter(ScriptedAdapter):
                 summary="Ablated design satisfies the requirement.",
             )
 
-        return self._run("final_review", build, FinalReviewResult)
+        result = self._run("final_review", build, FinalReviewResult)
+        # RC1 B403 fixture compatibility: re-account the recorded
+        # baseline when the scripted result predates the id protocol.
+        if not result.acceptance_coverage and acceptance_coverage:
+            result.acceptance_coverage = [
+                AcceptanceCoverageEntry(
+                    acceptance_id=entry.acceptance_id,
+                    criterion=entry.criterion,
+                    status="PASS",
+                )
+                for entry in acceptance_coverage
+            ]
+        elif not result.acceptance_coverage and contract.acceptance_criteria:
+            result.acceptance_coverage = [
+                AcceptanceCoverageEntry(
+                    acceptance_id=criterion.id,
+                    criterion=criterion.criterion,
+                    status="PASS",
+                )
+                for criterion in contract.acceptance_criteria
+            ]
+        return result
 
 
 def make_blocking_issue(
